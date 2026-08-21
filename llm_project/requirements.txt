@@ -1,0 +1,12 @@
+# Core
+openai>=1.60           # GPT API client (default provider)
+streamlit>=1.30        # web UI
+pandas>=2.0            # results tables (pulled in by streamlit anyway)
+altair>=5.0            # charts (bundled with streamlit)
+
+# Optional: only needed if you switch the backend to Anthropic
+anthropic>=0.40
+
+# Optional: only if you prefer loading Alpaca through Hugging Face instead of
+# the bundled JSON downloader. Everything works without it.
+# datasets>=2.16

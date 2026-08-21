@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(../venv/Scripts/python.exe run_analysis.py --backend mock -q \"Operating margin has fallen for six straight months. What is driving it and what should we do?\" --out \"C:/Users/Anirudh/AppData/Local/Temp/claude/C--Users-Anirudh-OneDrive-Desktop-MTech-Project/c8f51b54-b369-454d-b60e-65a1d2ba93c2/scratchpad/mockrun\")"
+    ]
+  }
+}

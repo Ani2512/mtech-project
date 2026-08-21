@@ -1,0 +1,41 @@
+# ---- Secrets: never commit ----
+.env
+*.env
+!.env.example
+Sonnet API Key.txt
+*key*.txt
+
+# ---- Virtual environments ----
+.venv/
+venv/
+env/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ---- Model / embedding caches (downloaded, regenerable) ----
+.cache/
+
+# ---- Large generated artifacts ----
+prompt_engineering_project/embedding_index_3m.json
+llm_project/data/
+genai_project/data/
+
+# ---- Run artifacts & logs ----
+runs/
+*.log
+
+# ---- Submission archive (redundant copy of prompt_engineering_project) ----
+*.zip
+
+# ---- IDE / OS ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ---- Nested clone of this same repo ----
+mtech-project/

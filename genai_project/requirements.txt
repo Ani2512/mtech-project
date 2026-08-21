@@ -1,0 +1,13 @@
+# Core
+openai>=1.60             # GPT API client (default backend)
+streamlit>=1.30          # web UI
+numpy>=1.26              # dense (LSA/SVD) half of the hybrid retriever
+
+# Optional: only needed if you switch the backend to Anthropic in the sidebar.
+# Everything else works without it.
+anthropic>=0.60
+
+# Deliberately absent: pandas, langchain, faiss, chromadb, sentence-transformers.
+# The analytics layer is stdlib `csv` + `statistics`, and retrieval is BM25 +
+# numpy SVD over ~25 passages — a vector database would be more moving parts
+# than the corpus justifies. See README §6.
