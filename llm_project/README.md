@@ -12,6 +12,15 @@ version that actually scores better on data it has never optimized against.
 **Model:** `gpt-5.6-luna` (OpenAI) by default. The backend is swappable —
 Anthropic Claude and an offline mock are also supported.
 
+**Headline result, from seven live experiments:** the method's success depends
+on the *executor*, not on the optimizer. Against a frontier task model the
+effect is **+0.0008 ± 0.0098** over 310 held-out examples — a measured null, on
+a benchmark whose baseline is already near ceiling. Move the task role to
+`gpt-3.5-turbo` and change nothing else, and it becomes **+0.0256, 95% CI
+[+0.0080, +0.0435], p = 0.0057** on 250 disjoint examples. That gain is
+concentrated in rescued failures rather than spread across typical answers.
+Full analysis in [§8](#what-the-runs-actually-found).
+
 ---
 
 ## 1. Why this is a hard problem
