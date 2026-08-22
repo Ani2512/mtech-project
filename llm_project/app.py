@@ -378,16 +378,22 @@ def render_optimize_tab(settings: Settings, go: bool, run_test: bool) -> None:
         with st.status("Optimizing…", expanded=True) as status:
             result = optimize(backend, split, settings, progress=progress)
             comparison = None
+            budget_note = None
             if run_test:
                 status.update(label="Evaluating on held-out test split…")
-                comparison = compare_on_test(
-                    backend,
-                    result.initial_prompt,
-                    result.best_prompt,
-                    split.test,
-                    settings,
-                    progress=progress,
-                )
+                try:
+                    comparison = compare_on_test(
+                        backend,
+                        result.initial_prompt,
+                        result.best_prompt,
+                        split.test,
+                        settings,
+                        progress=progress,
+                    )
+                except BudgetExceeded as exc:
+                    # The optimization is already paid for; keep it rather than
+                    # losing the whole run to the ceiling.
+                    budget_note = str(exc)
             status.update(label="Done", state="complete")
 
         run_dir = new_run_dir()
@@ -404,6 +410,11 @@ def render_optimize_tab(settings: Settings, go: bool, run_test: bool) -> None:
         st.session_state["settings"] = settings
         st.session_state["run_dir"] = str(run_dir)
         st.success(f"Finished. Artifacts saved to `{run_dir}`")
+        if budget_note:
+            st.warning(
+                f"Budget limit reached during held-out evaluation: {budget_note} "
+                "The optimized prompt is saved; the comparison is not."
+            )
         st.info("Open the **Results** tab for the optimized prompt and scores.")
 
     except BudgetExceeded as exc:

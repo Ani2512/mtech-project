@@ -25,6 +25,7 @@ from .config import (
     Settings,
     estimate_cost,
     load_api_key,
+    supports_reasoning_effort,
 )
 
 
@@ -187,7 +188,9 @@ class OpenAIBackend(_BaseBackend):
         s = self.settings
         model = s.model_for(role)
         max_tokens = s.max_tokens_for(role)
-        effort = s.effort_for(role)
+        # Cheap executors (gpt-4.x, 3.5) reject this parameter with a 400, so
+        # it is omitted for them rather than sent and failed on.
+        effort = s.effort_for(role) if supports_reasoning_effort(model) else None
 
         messages: list[dict[str, str]] = []
         if system:
@@ -228,8 +231,9 @@ class OpenAIBackend(_BaseBackend):
             "model": model,
             "messages": messages,
             "max_completion_tokens": max_tokens,
-            "reasoning_effort": effort,
         }
+        if effort is not None:
+            kwargs["reasoning_effort"] = effort
         if response_format is not None:
             kwargs["response_format"] = response_format
 
@@ -347,6 +351,10 @@ class MockBackend(_BaseBackend):
         system: str | None = None,
         schema: dict | None = None,
     ) -> Completion:
+        # Enforced here too, so a ceiling can be rehearsed offline and behaves
+        # the same way it will against a real provider.
+        self._check_budget()
+
         seed = int(
             hashlib.sha256(
                 f"{role}|{system}|{prompt}".encode("utf-8")

@@ -18,7 +18,7 @@ import argparse
 import pathlib
 import sys
 
-from apo.backends import make_backend
+from apo.backends import BudgetExceeded, make_backend
 from apo.config import Settings, load_api_key
 from apo.data import split_from_settings
 from apo.optimizer import compare_on_test, optimize
@@ -291,14 +291,20 @@ def main(argv: list[str] | None = None) -> int:
     comparison = None
     if not args.skip_test:
         print("\n=== Held-out evaluation ===", flush=True)
-        comparison = compare_on_test(
-            backend,
-            result.initial_prompt,
-            result.best_prompt,
-            split.test,
-            settings,
-            progress=progress,
-        )
+        try:
+            comparison = compare_on_test(
+                backend,
+                result.initial_prompt,
+                result.best_prompt,
+                split.test,
+                settings,
+                progress=progress,
+            )
+        except BudgetExceeded as exc:
+            # The optimization itself is already paid for; losing it here would
+            # throw away the whole run. Save what we have and say so.
+            print(f"\nBudget limit reached during held-out evaluation: {exc}")
+            print("The optimized prompt is still saved; the comparison is not.")
 
     run_dir = new_run_dir()
     save_run(
