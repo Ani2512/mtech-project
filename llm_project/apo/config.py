@@ -27,6 +27,18 @@ PROVIDER_KEY_ENV = {
 MODEL_PRICING: dict[str, tuple[float, float]] = {
     # OpenAI
     "gpt-5.6-luna": (1.00, 6.00),
+    # Cheaper executors, for running the task role on a model that is weak
+    # enough to leave the baseline prompt below ceiling. Verified against
+    # developers.openai.com/api/docs/pricing on 2026-08-21.
+    "gpt-5": (1.25, 10.00),
+    "gpt-5-mini": (0.25, 2.00),
+    "gpt-5-nano": (0.05, 0.40),
+    "gpt-4.1": (2.00, 8.00),
+    "gpt-4.1-mini": (0.40, 1.60),
+    "gpt-4.1-nano": (0.10, 0.40),
+    "gpt-4o": (2.50, 10.00),
+    "gpt-4o-mini": (0.15, 0.60),
+    "gpt-3.5-turbo": (0.50, 1.50),
     # Anthropic (kept so existing runs still price correctly)
     "claude-opus-5": (5.00, 25.00),
     "claude-sonnet-5": (3.00, 15.00),
@@ -35,11 +47,33 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
 
 # Models offered in the UI, per provider.
 PROVIDER_MODELS = {
-    PROVIDER_OPENAI: ["gpt-5.6-luna"],
+    # The weaker executors are offered so the weak-executor experiment can be
+    # reproduced from the UI, not only from the command line. Pick one as the
+    # task model and leave judge/optimizer on the default.
+    PROVIDER_OPENAI: [
+        "gpt-5.6-luna",
+        "gpt-5",
+        "gpt-5-mini",
+        "gpt-5-nano",
+        "gpt-4.1",
+        "gpt-4.1-mini",
+        "gpt-4o-mini",
+        "gpt-3.5-turbo",
+    ],
     PROVIDER_ANTHROPIC: ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
 }
 
 DEFAULT_MODEL = "gpt-5.6-luna"
+
+# The gpt-4.x / 3.5 families reject `reasoning_effort` outright with a 400.
+# That only matters once the task role runs on a cheap executor, which is the
+# point of the weak-executor experiment.
+NON_REASONING_PREFIXES = ("gpt-4", "gpt-3.5", "chatgpt", "babbage", "davinci")
+
+
+def supports_reasoning_effort(model: str) -> bool:
+    """Whether `model` accepts the `reasoning_effort` request parameter."""
+    return not model.startswith(NON_REASONING_PREFIXES)
 
 # The three roles the system plays. Each can use a different model.
 ROLE_TASK = "task"  # answers Alpaca instructions using the prompt under test

@@ -62,6 +62,19 @@ apo/
 └── reporting.py   Budget estimation, run artifacts, markdown report
 ```
 
+Top-level drivers, none of which contain algorithm logic:
+
+```
+run_optimize.py       CLI: one full search + held-out comparison
+run_replicate.py      Re-score a finished run's prompt on fresh disjoint data
+probe_headroom.py     ~$0.04 precondition check: does this task model leave the
+                      baseline below ceiling? Run before spending on a search.
+run_weak_executor.sh  Driver for the Run 6/7 arm: probe | estimate | optimize |
+                      replicate
+app.py                Streamlit UI over the same pipeline
+list_models.py        Enumerate models the configured keys can reach
+```
+
 Dependency direction (nothing points backwards):
 
 ```
@@ -743,12 +756,18 @@ via `AppTest`.
 
 ## 12. Empirical findings
 
-Five live experiments on `gpt-5.6-luna`. Runs 1–3 use the summarisation family
-and all produced **null results**; the reasons are worth recording, because they
-are not the same reason each time. Run 4 changes the *measurement* rather than
-the data and is the first to produce a positive effect. Run 5 is a replication
-of Run 4 on disjoint data at the sample size Run 4's own power analysis called
-for.
+Seven live experiments. Runs 1–3 use the summarisation family and all produced
+**null results**; the reasons are worth recording, because they are not the same
+reason each time. Run 4 changes the *measurement* rather than the data and is
+the first to produce a positive effect. Run 5 is a replication of Run 4 on
+disjoint data at the sample size Run 4's own power analysis called for, and it
+comes back null.
+
+Runs 1–5 all run the task role on `gpt-5.6-luna`. Their combined verdict — that
+a frontier model on Alpaca has no headroom for a prompt to win in — is a
+falsifiable claim, so Runs 6–7 test it by moving the task role onto
+`gpt-3.5-turbo` and changing nothing else. That arm produces the project's only
+effect that survives replication.
 
 ### Run 1 — underpowered (12/12/12, $0.21)
 
@@ -1015,15 +1034,146 @@ differences also fell from 0.1123 to 0.0814, which is what a fluctuating
 | Run 5 | 250 | −0.0034 | 0.0814 | ±0.0101 |
 | **pooled** | **310** | **+0.0008** | 0.0885 | **±0.0098** |
 
-### What the five experiments establish together
+### Run 6 — a weak executor (`gpt-3.5-turbo` task model, $0.61)
 
-**The project's main result: on Alpaca with a frontier task model, automatic
-prompt optimization produces no measurable improvement over a one-line baseline
-— and the first three runs could not have told you that, because their metric
-was saturated.**
+Runs 1–5 all left the same escape hatch open. Every one of them ran the task
+role on a frontier model, and the closing diagnosis of Run 5 was that such a
+model has no room to improve. That is a hypothesis about the *benchmark*, and it
+predicts something specific: move the task role onto a model that genuinely
+fails, and the effect should appear.
 
-The distinction matters. "We found no effect" and "our instrument could not
-detect one" are different claims, and Runs 1–3 only supported the second.
+Run 6 does exactly that and nothing else. The task role runs on
+`gpt-3.5-turbo`; judge and optimizer stay on `gpt-5.6-luna`. Same strict rubric,
+same 40/40/60 split at seed 13, same three iterations at beam width 2, same
+weights. Only the executor changes.
+
+**Precondition first.** `probe_headroom.py` exists so this is checked before
+money is spent: it runs the baseline prompt on 20 examples for roughly $0.04 and
+reports where the executor lands relative to the frontier model's 0.789.
+
+| | Baseline score |
+|---|---|
+| `gpt-5.6-luna` (Runs 4–5 reference) | 0.789 |
+| `gpt-3.5-turbo` (probe, n=20) | **0.6948** |
+
+Roughly nine points of headroom, and the verdict is *usable*. Only then does the
+run proceed.
+
+| Component | Baseline | Optimized | Delta |
+|---|---|---|---|
+| **total** | **0.7016** | **0.7542** | **+0.0526** |
+| judge (strict) | 0.8335 | 0.8902 | +0.0567 |
+| rouge_l | 0.3660 | 0.4097 | +0.0437 |
+| token_f1 | 0.4216 | 0.4642 | +0.0426 |
+
+Win / loss / tie **39 / 17 / 4**. Bootstrap p = **0.0006**, 95% CI
+**[+0.0258, +0.0811]**. Dev score reached 0.8758 and improved at every one of
+the three iterations — no early stop. 299 calls, $0.355 for the search, ~$0.61
+including the held-out comparison.
+
+Every component moves in the same direction, which is the signature Run 2
+lacked: the judge, ROUGE-L and token-F1 agree on both sign and rough magnitude,
+so this is not one metric being gamed while the others sag.
+
+But Run 4 also looked like this, and Run 4 did not replicate.
+
+### Run 7 — replication of the weak-executor result ($1.08)
+
+Same protocol as Run 5. `run_replicate.py` loads Run 6's `config.json` so scoring
+is byte-identical, withholds all 140 rows Run 6 saw, draws **250 fresh examples**
+at seed 101, and re-runs the paired comparison on Run 6's optimized prompt. No
+search, no optimizer calls. 1000 calls, $1.08.
+
+| Component | Baseline | Optimized | Delta |
+|---|---|---|---|
+| **total** | **0.6875** | **0.7131** | **+0.0256** |
+| judge (strict) | 0.8343 | 0.8570 | +0.0227 |
+| rouge_l | 0.3063 | 0.3403 | +0.0340 |
+| token_f1 | 0.3835 | 0.4141 | +0.0306 |
+
+Win / loss / tie **125 / 109 / 16**. Bootstrap p = **0.0057**, 95% CI
+**[+0.0080, +0.0435]**.
+
+**The effect survived.** This is the first result in the project that does. The
+interval excludes zero on 250 disjoint examples, and every component again moves
+positive.
+
+It is also about **half** the discovery estimate. Run 6's +0.0526 sits outside
+Run 7's interval, exactly as Run 4's +0.0181 sat outside Run 5's — the winner's
+curse is present here too. The honest point estimate is Run 7's, not Run 6's.
+
+| | n | mean | sd | MDE at 95% |
+|---|---|---|---|---|
+| Run 6 | 60 | +0.0526 | 0.1104 | ±0.0279 |
+| Run 7 | 250 | +0.0256 | 0.1421 | ±0.0176 |
+| **pooled** | **310** | **+0.0308** | 0.1368 | **±0.0152** |
+
+#### What kind of effect it is
+
+The mean is real but it does not describe a typical example. The distribution of
+per-example differences is concentrated, and saying so matters more than the
+p-value:
+
+| Statistic | Value |
+|---|---|
+| mean | +0.0256 |
+| **median** | **0.0000** |
+| sign test (125 up / 109 down / 16 tied) | **p = 0.3268** |
+| 10 largest \|delta\| contribute | **+0.0149** of the +0.0256 |
+| examples with delta > +0.3 | 9 |
+| examples with delta < −0.3 | 1 |
+| the 17 examples scoring < 0.4 at baseline | **+0.1982** mean gain |
+
+The median change is exactly zero and the sign test is null: for most examples
+the optimized prompt changes nothing measurable. Roughly 58% of the mean comes
+from ten examples out of 250.
+
+Trimming confirms the shape without contradicting the result:
+
+| Trim | Mean |
+|---|---|
+| none | +0.0256 |
+| 5% | +0.0195 |
+| 10% | +0.0159 |
+| 20% | +0.0131 |
+
+The estimate shrinks as the tails are removed but **never flips sign**, so this
+is not a handful of outliers manufacturing an effect out of nothing — there is a
+positive drift underneath. The accurate one-line description is: *the optimized
+prompt rescues catastrophic failures; it does not broadly lift typical answers.*
+That is consistent with what the prompt actually says — most of its text is
+instructions to commit to a conclusion, follow the requested format, and stop,
+which are precisely the failure modes that produce a near-zero score on a weak
+executor.
+
+#### A confound worth recording
+
+An earlier pass at this analysis split the 250 examples into quintiles by
+*baseline score* and found a clean monotonic gradient: Q1 +0.048 falling
+smoothly to Q5 −0.024. It reads as decisive evidence that the method helps
+exactly where the baseline struggles.
+
+It is not admissible. Conditioning on a noisy measured score guarantees
+regression to the mean at both tails — examples that scored low partly by bad
+luck will score higher on re-measurement whatever the prompt does, and the
+mirror holds at the top. The gradient is what that artifact looks like, and it
+would appear even if the prompt were unchanged.
+
+Re-splitting by features fixed *before* measurement — whether the example has an
+`input` field, reference length, instruction verb — every subgroup interval
+contains zero. The `baseline < 0.4` figure in the table above carries the same
+caveat and is reported as description, not as evidence of moderation.
+
+### What the seven experiments establish together
+
+**The project's main result: automatic prompt optimization produces no
+measurable improvement on Alpaca when the task model is already good at the
+task, and a small but replicable one when it is not. The binding constraint is
+headroom in the benchmark, not the optimizer.**
+
+Runs 1–5 establish the first half; Runs 6–7 establish the second by
+falsification. Neither half is interesting alone — together they identify the
+variable that decides the outcome.
 
 - **Run 1** could not have detected an effect: noise 5× the signal, minimum
   detectable difference above the entire plausible effect range.
@@ -1039,29 +1189,52 @@ detect one" are different claims, and Runs 1–3 only supported the second.
   estimate turned positive for the first time (+0.0181) and was not driven by
   the metric-gaming clause the optimizer had inserted.
 - **Run 5** replicated Run 4's prompt on 250 disjoint examples and returned
-  −0.0034, excluding the Run 4 estimate. Pooled over all 310 held-out examples
-  the effect is **+0.0008 ± 0.0098**.
+  −0.0034, excluding the Run 4 estimate. Pooled over 310 held-out examples on a
+  frontier executor the effect is **+0.0008 ± 0.0098** — a genuine null, not an
+  inconclusive one.
+- **Run 6** changed one variable, the task model, to `gpt-3.5-turbo`, after a
+  $0.04 probe confirmed the baseline sat nine points below the frontier model's.
+  The effect appeared: **+0.0526**, p = 0.0006, all components agreeing.
+- **Run 7** replicated it on 250 disjoint examples: **+0.0256**, 95% CI
+  **[+0.0080, +0.0435]**, p = 0.0057. Halved, as the winner's curse predicts,
+  but it survived — the first effect in the project that did.
 
-This is now a genuine negative result rather than an inconclusive one. With
-n=310 the experiment can rule out any true effect larger than about **±0.01**,
-one percent of the score range, and the observed value is two orders of
-magnitude smaller than that bound.
+The two arms are the same experiment run either side of a threshold. Same
+optimizer, same rubric, same split sizes, same seed, same statistics; the only
+difference that matters is whether the baseline had anywhere to go. On a
+frontier executor the 95% interval is [−0.0090, +0.0106] and the answer is no.
+On a weak executor it is [+0.0080, +0.0435] and the answer is yes.
 
-The reason is visible in the baselines: `"You are a helpful assistant. Answer
-the user's instruction."` already scores 0.79–0.82 under a rubric that reserves
-90+ for flawless work, and complies with explicit length limits 99% of the time.
-Pryzant et al.'s gains come from binary classification tasks — jailbreak
-detection, sarcasm — scored by hard F1 against a discrete correct answer, where
-baselines sit far below ceiling. **Open-ended generation judged against a single
-reference, performed by a model that is already good at it, has no room for a
-prompt to win in.** Nothing here contradicts the paper; the task simply does not
-reach the question.
+This is what makes the Run 1–5 null interpretable rather than merely
+disappointing. A null result alone is compatible with a broken implementation;
+the same code producing a replicated positive effect the moment headroom exists
+rules that out. **The optimizer works. Runs 1–5 were measuring a task with no
+room left in it.**
 
-Falsifying this would need a task where the baseline genuinely fails — a weaker
-or smaller task model, an adversarial or domain-specific instruction set, or a
-metric with a discrete correct answer. That is a different benchmark, not a
-different prompt optimizer.
+Two qualifications belong next to the positive result, and neither is small.
 
+*The effect is concentrated, not broad.* Median change 0.0000, sign test null,
+58% of the mean from ten examples out of 250. It rescues catastrophic failures
+rather than lifting typical answers. A practitioner reading "+2.6 points" and
+expecting every response to improve slightly would be misled; the realistic
+expectation is that a small number of bad answers stop being bad.
+
+*The effect is smaller than the cost of finding it.* Run 6 plus Run 7 cost
+$1.69 to establish +0.0256 on one prompt for one model on one dataset. Nothing
+here says that trade is worthwhile in practice — only that the improvement is
+real.
+
+Neither arm contradicts Pryzant et al. Their gains come from binary
+classification — jailbreak detection, sarcasm — scored by hard F1 against a
+discrete correct answer, with baselines far below ceiling. The mechanism this
+project reproduces is the same one: **the method needs failures to learn from.**
+Supply them and it works; withhold them and there is nothing for a textual
+gradient to point at.
+
+The remaining open question is no longer whether the optimizer functions but
+whether the concentrated, tail-driven improvement it produces generalises beyond
+a weak executor on Alpaca — to domain-specific instruction sets, to adversarial
+inputs, or to tasks where the reference answer is not a single sentence.
 ---
 
 ## 13. Known limitations

@@ -263,8 +263,9 @@ rather than declaring victory. Increase `--test` for more statistical power.
 
 ### What the runs actually found
 
-Five live experiments on `gpt-5.6-luna`. **None found a significant
-improvement**, and reporting that is the point rather than an embarrassment.
+Seven live experiments. Runs 1–5 run the task role on `gpt-5.6-luna` and **none
+found a significant improvement**. Runs 6–7 change one variable — the task model
+— and the effect appears and replicates. Reporting both halves is the point.
 
 | Run | Config | Baseline → Optimized | p | Win/loss |
 |---|---|---|---|---|
@@ -273,6 +274,8 @@ improvement**, and reporting that is the point rather than an embarrassment.
 | 3 | + `--min-input-chars 200` | 0.8153 → 0.8145 | 0.84 | **37 / 22** |
 | 4 | constraint family, `--judge-rubric strict` | 0.7889 → **0.8071** | 0.21 | 28 / 26 |
 | 5 | replication of run 4, **n=250** disjoint | 0.8149 → 0.8115 | 0.51 | 109 / 113 |
+| 6 | task model → **`gpt-3.5-turbo`**, strict rubric | 0.7016 → **0.7542** | **0.0006** | **39 / 17** |
+| 7 | replication of run 6, **n=250** disjoint | 0.6875 → **0.7131** | **0.0057** | 125 / 109 |
 
 Run 2's failure had a diagnosable cause: **62% of the evaluation set was
 unanswerable**. Alpaca's `summarize` items frequently supply a bare URL as the
@@ -308,17 +311,38 @@ saw**. It returned **−0.0034**, with a 95% CI of [−0.0137, +0.0067] that exc
 Run 4's estimate, and wins and losses dead even at 109/113. Run 4's gain was
 sampling noise.
 
-**The result: on Alpaca with a frontier task model, automatic prompt
-optimization produces no measurable improvement over a one-line baseline — and
-the first three runs could not have told you that, because their metric was
-saturated.** Pooled over all 310 held-out examples the effect is **+0.0008 ±
-0.0098**, so any true effect larger than about 1% of the score range is ruled
-out. The cause is visible in the baseline: `"You are a helpful assistant."`
-already scores 0.79–0.82 under a rubric reserving 90+ for flawless work, and
-obeys explicit length limits 99% of the time. There is no room for a prompt to
-win in. See [HOW_IT_WORKS.md §12](HOW_IT_WORKS.md) for the full analysis,
-including a JSON-schema bug that silently cancelled the strict rubric on its
-first attempt.
+Pooled over all 310 held-out examples on a frontier executor the effect is
+**+0.0008 ± 0.0098** — a genuine null, not an inconclusive one. The cause is
+visible in the baseline: `"You are a helpful assistant."` already scores
+0.79–0.82 under a rubric reserving 90+ for flawless work, and obeys explicit
+length limits 99% of the time. There is no room for a prompt to win in.
+
+That explanation is falsifiable, so Runs 6–7 tested it. Moving the task role to
+`gpt-3.5-turbo` — judge and optimizer unchanged, same rubric, same split sizes,
+same seed — dropped the baseline to 0.70 and the effect appeared: **+0.0526,
+p = 0.0006**. Run 7 re-scored that prompt on 250 disjoint examples and it
+**survived**: **+0.0256, 95% CI [+0.0080, +0.0435], p = 0.0057**. Halved, as the
+winner's curse predicts, but the first effect in the project that replicated.
+
+**The result: automatic prompt optimization produces no measurable improvement
+on Alpaca when the task model is already good at the task, and a small but
+replicable one when it is not. The binding constraint is headroom in the
+benchmark, not the optimizer.** The null arm is what makes the positive arm
+interpretable, and vice versa — a null alone is compatible with broken code,
+whereas the same code producing a replicated effect the moment headroom exists
+rules that out.
+
+Two qualifications belong on the positive result. It is **concentrated, not
+broad**: the median change is 0.0000, the sign test is null (p = 0.33), and 58%
+of the mean comes from ten examples out of 250. It rescues catastrophic failures
+rather than lifting typical answers. And it **cost more to find than it is
+worth** — $1.69 to establish +0.0256 on one prompt, one model, one dataset.
+
+Reproduce the weak-executor arm with `./run_weak_executor.sh probe`, then
+`optimize`, then `replicate <run_dir>`. See
+[HOW_IT_WORKS.md §12](HOW_IT_WORKS.md) for the full analysis, including a
+JSON-schema bug that silently cancelled the strict rubric on its first attempt
+and a regression-to-the-mean artifact that nearly became a finding.
 
 ---
 
@@ -334,7 +358,9 @@ first attempt.
   bias — by default both are `gpt-5.6-luna`, which is the strongest form of this
   problem. Setting `--judge-model` to a different model, or `--backend anthropic`
   for the judge role, is the mitigation the config supports, and is worth doing
-  before quoting any number in a report.
+  before quoting any number in a report. Runs 6–7 avoid it by construction: the
+  task model is `gpt-3.5-turbo` and the judge is `gpt-5.6-luna`, so the positive
+  result there is not a model grading its own family.
 - **Small splits overfit.** With 40 dev examples, the bandit can select a prompt
   that happens to suit those 40. The held-out test split exists precisely to
   detect this — a large dev gain with a flat test result means overfitting.
