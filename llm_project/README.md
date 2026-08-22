@@ -156,10 +156,21 @@ scoring, UI and tests are provider-agnostic.
 
 ## 5. Setup
 
-```powershell
-cd "C:\Users\Anirudh\OneDrive\Desktop\MTech Project\llm_project"
-.\venv\Scripts\python.exe -m pip install -r requirements.txt
+```bash
+cd "/Users/anirudh/Desktop/MTech Project/llm_project"
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 ```
+
+**Certificates.** Python 3.14 from python.org ships without root certificates,
+so the Alpaca download and every API call fail with `CERTIFICATE_VERIFY_FAILED`
+until you point at `certifi`'s bundle. Export this once per shell:
+
+```bash
+export SSL_CERT_FILE="$(.venv/bin/python -c 'import certifi; print(certifi.where())')"
+```
+
+`run_weak_executor.sh` sets it for you; `run_optimize.py` invoked directly does not.
 
 Then add your API key — copy `.env.example` to `.env` and paste the key in:
 
@@ -169,19 +180,26 @@ OPENAI_API_KEY=sk-proj-...
 
 `.env` is gitignored. Check which models the key can reach:
 
-```powershell
-.\venv\Scripts\python.exe list_models.py --filter gpt-5.6
+```bash
+.venv/bin/python list_models.py --filter gpt-5.6
 ```
 
 **Note on key hygiene:** a key sitting in a plaintext file inside a synced
-OneDrive folder is one sharing mistake away from being public — keep keys in
+cloud folder is one sharing mistake away from being public — keep keys in
 `.env` only, and rotate any key that has been stored elsewhere.
 
-Verify everything works without spending anything:
+Verify everything works without spending anything. The mock backend exercises
+the whole search end to end — gradients, bandit, held-out comparison, report —
+with a stub LLM, so it costs nothing and needs no key:
 
-```powershell
-.\venv\Scripts\python.exe -m unittest discover -s tests
+```bash
+.venv/bin/python run_optimize.py --backend mock --iterations 1 \
+    --train 6 --dev 6 --test 8 -y
 ```
+
+It should finish in seconds and print `Estimated cost: $0.000`. Note that it
+writes a real run directory under `runs/`, which you will probably want to
+delete afterwards so it does not clutter the Runs tab.
 
 ---
 
@@ -189,29 +207,30 @@ Verify everything works without spending anything:
 
 ### Streamlit UI
 
-```powershell
-.\venv\Scripts\python.exe -m streamlit run app.py
+```bash
+.venv/bin/python -m streamlit run app.py
 ```
 
 Five tabs: **Optimize** (configure and watch the run live), **Results** (score
 trajectory, baseline-vs-optimized metrics, per-example diff), **Dataset**
 (browse Alpaca), **Runs** (reload past runs), **Playground** (try any prompt on
-any instruction).
+any instruction). The Runs tab reloads any past run from disk, so you can read
+every result in this README without spending anything.
 
 ### Command line
 
-```powershell
+```bash
 # What would this cost? Nothing is called.
-.\venv\Scripts\python.exe run_optimize.py --dry-run
+.venv/bin/python run_optimize.py --dry-run
 
 # Full offline smoke test — no key, no cost
-.\venv\Scripts\python.exe run_optimize.py --backend mock --iterations 2
+.venv/bin/python run_optimize.py --backend mock --iterations 2
 
 # A real run, restricted to summarisation-style tasks
-.\venv\Scripts\python.exe run_optimize.py --filter summarize --with-input --iterations 3
+.venv/bin/python run_optimize.py --filter summarize --with-input --iterations 3
 
 # Cheaper: skip the judge, smaller splits
-.\venv\Scripts\python.exe run_optimize.py --no-judge --train 20 --dev 20 --test 30
+.venv/bin/python run_optimize.py --no-judge --train 20 --dev 20 --test 30
 ```
 
 `--help` lists every flag. The most useful ones:
@@ -223,9 +242,28 @@ any instruction).
 | `--gradients` `--edits` `--paraphrases` | Candidates generated per step |
 | `--backend` | `openai` (default), `anthropic`, or `mock` |
 | `--model` | Set all three roles at once (e.g. `gpt-5.6-luna`) |
+| `--task-model` | Set the executor alone — this is the lever that mattered (see §8) |
 | `--no-judge` | Lexical scoring only — much cheaper, much noisier |
 | `--max-cost` | Hard spend ceiling; the run stops cleanly when hit |
 | `--dry-run` | Print the budget estimate and exit |
+
+### Reproducing the headline result
+
+The weak-executor arm is scripted. The wrapper pins seed 13, the strict rubric
+and the 40/40/60 split, so the two arms stay directly comparable:
+
+```bash
+./run_weak_executor.sh probe                 # a few cents — is the executor weak enough?
+./run_weak_executor.sh optimize              # ~$0.80     — the experiment
+./run_weak_executor.sh replicate runs/<ts>   # ~$1.30     — does the gain survive?
+```
+
+Two things to expect. The probe reports **marginal** rather than *usable* —
+`gpt-3.5-turbo` scores 0.6948 and the `usable` band requires below 0.65 — and
+that is fine; the effect appeared anyway, which says the threshold is
+conservative. And `replicate` takes the directory `optimize` has just created,
+not an older one, or you are re-testing a prompt on the split it was selected
+against.
 
 ---
 
