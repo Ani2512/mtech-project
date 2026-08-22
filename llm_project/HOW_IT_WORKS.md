@@ -1056,8 +1056,11 @@ reports where the executor lands relative to the frontier model's 0.789.
 | `gpt-5.6-luna` (Runs 4–5 reference) | 0.789 |
 | `gpt-3.5-turbo` (probe, n=20) | **0.6948** |
 
-Roughly nine points of headroom, and the verdict is *usable*. Only then does the
-run proceed.
+Roughly nine points of headroom. The probe's own verdict is *marginal* rather
+than *usable* — its `usable` band requires a baseline below 0.65, and 0.6948
+clears only the weaker `< reference − 0.03` test. The run proceeded on that
+marginal verdict, and the effect appeared anyway, which says the 0.65 threshold
+is conservative rather than that the probe was ignored.
 
 | Component | Baseline | Optimized | Delta |
 |---|---|---|---|
