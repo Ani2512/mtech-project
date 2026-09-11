@@ -115,7 +115,15 @@ class Qwen25OmniBackend:
         audios, images, videos = process_mm_info(conv, use_audio_in_video=False)
         inputs = self.processor(text=text, audio=audios, images=images, videos=videos, return_tensors="pt", padding=True).to(self.model.device)
         with self.torch.no_grad():
-            ids = self.model.generate(**inputs, return_audio=False, max_new_tokens=self.max_new_tokens, do_sample=False)
+            # Call the thinker directly rather than the top-level generate().
+            # Qwen2_5OmniForConditionalGeneration.generate builds the talker's
+            # kwargs dict unconditionally -- it reads self.talker.codec_pad_token
+            # before checking whether audio output was requested -- so with
+            # enable_audio_output=False it raises
+            #   AttributeError: 'Qwen2_5OmniForConditionalGeneration' object has no attribute 'talker'
+            # The text path inside that method is exactly self.thinker.generate(...),
+            # which is what we want and which skips the broken branch.
+            ids = self.model.thinker.generate(**inputs, max_new_tokens=self.max_new_tokens, do_sample=False)
         ids = ids[:, inputs["input_ids"].shape[1]:]
         return self.processor.batch_decode(ids, skip_special_tokens=True)[0].strip()
 
