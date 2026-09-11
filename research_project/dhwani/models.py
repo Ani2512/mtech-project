@@ -104,12 +104,28 @@ class Qwen25OmniBackend:
             model_id, enable_audio_output=False, **kw
         ).eval()
         if adapter:
+            import os
+
             from peft import PeftModel
+
+            # The adapter's own processor carries any timestamp tokens that were
+            # added during training. Load it rather than the base one, or the
+            # model emits tokens the tokenizer cannot decode.
+            proc_src = adapter if os.path.exists(os.path.join(adapter, "tokenizer_config.json")) else model_id
+            self.processor = Qwen2_5OmniProcessor.from_pretrained(proc_src)
+            n_tok = len(self.processor.tokenizer)
+            cur = self.model.thinker.get_input_embeddings().weight.shape[0]
+            if n_tok != cur:
+                # modules_to_save stored full embed_tokens/lm_head at the trained
+                # size; the base model must match before the adapter attaches.
+                print(f"[qwen2.5-omni] resizing embeddings {cur} -> {n_tok} for the adapter")
+                self.model.thinker.resize_token_embeddings(n_tok)
             # train_lora tunes the thinker, so the adapter attaches there, not to
             # the top-level wrapper whose module names it would not match.
             self.model.thinker = PeftModel.from_pretrained(self.model.thinker, adapter).eval()
-            self.name = f"qwen2.5-omni+lora"
-        self.processor = Qwen2_5OmniProcessor.from_pretrained(model_id)
+            self.name = "qwen2.5-omni+lora"
+        else:
+            self.processor = Qwen2_5OmniProcessor.from_pretrained(model_id)
 
     def ground(self, audio_path, query_text, query=None, duration=None):
         from qwen_omni_utils import process_mm_info

@@ -88,11 +88,20 @@ def _pair_from_dict(d: dict) -> Interval | None:
     return None
 
 
+_TIME_TOK = re.compile(r"<t=(?:\d+\.\d|none)>")
+
+
 def parse_intervals(text: str) -> list[Interval] | None:
     """Return a list of (start, end); [] for an explicit empty answer; None if unparseable."""
     if text is None:
         return None
     text = text.strip()
+    # 0) atomic timestamp tokens, if the model was trained with them. Handled
+    #    here rather than in the runner so both output formats are scored by the
+    #    same path and the arms stay comparable.
+    if _TIME_TOK.search(text):
+        from .timetokens import TimeVocab
+        return TimeVocab().decode(text)
     # 1) a bracketed literal anywhere in the text, as JSON then as a Python literal
     #    (models frequently emit single-quoted dicts, which json.loads rejects)
     for m in re.finditer(r"\[[^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*\]", text):

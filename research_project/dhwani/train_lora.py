@@ -70,7 +70,8 @@ class GroundingCollator:
 
 
 def build_model(model_id: str, precision: str | None, lora_r: int, lora_alpha: int,
-                lora_dropout: float):
+                lora_dropout: float, time_tokens: bool = False, max_seconds: float = 30.0,
+                resolution: float = 0.1):
     import torch
     from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
     from transformers import Qwen2_5OmniProcessor, Qwen2_5OmniThinkerForConditionalGeneration
@@ -82,6 +83,19 @@ def build_model(model_id: str, precision: str | None, lora_r: int, lora_alpha: i
     # Load the thinker alone: the talker is speech synthesis and is dead weight here.
     model = Qwen2_5OmniThinkerForConditionalGeneration.from_pretrained(model_id, **kw)
     processor = Qwen2_5OmniProcessor.from_pretrained(model_id)
+
+    vocab = None
+    if time_tokens:
+        from .timetokens import TimeVocab
+
+        vocab = TimeVocab(max_seconds, resolution)
+        added = processor.tokenizer.add_tokens(vocab.tokens, special_tokens=False)
+        model.resize_token_embeddings(len(processor.tokenizer))
+        # TEMPO (arXiv:2608.29999): initialise each new embedding as the mean of
+        # the BPE pieces of the number it stands for, so the tokens start where
+        # the model already represents those digits rather than at random.
+        n = vocab.init_embeddings(processor.tokenizer, model.get_input_embeddings().weight)
+        print(f"[train] added {added} timestamp tokens, initialised {n} embeddings")
 
     if "4bit" in label or "8bit" in label:
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
@@ -95,10 +109,87 @@ def build_model(model_id: str, precision: str | None, lora_r: int, lora_alpha: i
         # fastest way to overfit the composed-audio distribution.
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                         "gate_proj", "up_proj", "down_proj"],
+        # New timestamp embeddings are not low-rank updates to existing weights;
+        # they are new rows and must be trained in full, or they stay at their
+        # initialisation and the whole scheme is inert.
+        modules_to_save=(["embed_tokens", "lm_head"] if time_tokens else None),
     )
     model = get_peft_model(model, cfg)
     model.print_trainable_parameters()
-    return model, processor
+    return model, processor, vocab
+
+
+def time_loss_terms(logits, labels, time_ids, Q, ignore_index: int = -100):
+    """TEMPO's distance-aware auxiliary loss, restricted to timestamp positions.
+
+    Plain cross-entropy treats a prediction 0.1 s off as exactly as wrong as one
+    10 s off, which throws away the ordinal structure that makes a timestamp
+    vocabulary worth having. Instead score those positions against a Gaussian
+    over neighbouring times:
+
+        q_k  proportional to  exp(-(t_k - t*)^2 / (2 sigma^2))
+        L_time = - sum_k q_k log p_k
+
+    `Q[i]` is the precomputed soft target for the i-th time token.
+    Returns (loss, n_positions); loss is 0 when the batch has no timestamps.
+    """
+    import torch
+
+    # causal shift: position j predicts token j+1
+    logits = logits[:, :-1, :]
+    labels = labels[:, 1:]
+
+    lut = torch.full((int(logits.shape[-1]),), -1, dtype=torch.long, device=labels.device)
+    lut[time_ids] = torch.arange(len(time_ids), device=labels.device)
+    safe = labels.clamp_min(0)
+    row = torch.where(labels == ignore_index, torch.full_like(labels, -1), lut[safe])
+    mask = row >= 0
+    n = int(mask.sum())
+    if n == 0:
+        return logits.new_zeros(()), 0
+
+    sel = logits[mask][:, time_ids]                      # [n, T] timestamp columns only
+    logp = torch.log_softmax(sel.float(), dim=-1)
+    q = Q[row[mask]]                                     # [n, T]
+    return -(q * logp).sum(dim=-1).mean(), n
+
+
+def _make_time_trainer():
+    """Built lazily so importing this module does not require transformers."""
+    from transformers import Trainer
+
+    class TimeAwareTrainer(Trainer):
+        def configure_time_loss(self, tokenizer, vocab, sigma: float, lam: float):
+            import torch
+
+            from .timetokens import EMPTY_TOKEN
+
+            ids = [tokenizer.convert_tokens_to_ids(t) for t in vocab.tokens
+                   if t != EMPTY_TOKEN]
+            if any(i is None or i < 0 for i in ids):
+                raise ValueError("timestamp tokens are missing from the tokenizer; "
+                                 "add_tokens must run before the trainer is built")
+            self._time_ids = torch.tensor(ids, dtype=torch.long)
+            self._Q = torch.tensor([vocab.soft_labels(t, sigma)[:-1] for t in vocab.times],
+                                   dtype=torch.float)
+            self._lam = float(lam)
+            self._time_seen = 0
+
+        def compute_loss(self, model, inputs, return_outputs=False, **kw):
+            labels = inputs.get("labels")
+            outputs = model(**inputs)
+            loss = outputs.loss
+            if labels is not None and getattr(self, "_lam", 0.0) > 0:
+                dev = outputs.logits.device
+                if self._time_ids.device != dev:
+                    self._time_ids = self._time_ids.to(dev)
+                    self._Q = self._Q.to(dev)
+                l_time, n = time_loss_terms(outputs.logits, labels, self._time_ids, self._Q)
+                self._time_seen += n
+                loss = loss + self._lam * l_time
+            return (loss, outputs) if return_outputs else loss
+
+    return TimeAwareTrainer
 
 
 def main(argv=None):
@@ -116,6 +207,14 @@ def main(argv=None):
     ap.add_argument("--lora-dropout", type=float, default=0.05)
     ap.add_argument("--precision", default=None, choices=["fp16", "8bit", "4bit"])
     ap.add_argument("--max-steps", type=int, default=-1)
+    ap.add_argument("--time-tokens", action="store_true",
+                    help="atomic timestamp tokens plus the distance-aware Gaussian loss")
+    ap.add_argument("--max-seconds", type=float, default=30.0)
+    ap.add_argument("--resolution", type=float, default=0.1)
+    ap.add_argument("--time-sigma", type=float, default=0.3,
+                    help="TEMPO uses 0.3 s")
+    ap.add_argument("--time-lambda", type=float, default=0.5,
+                    help="TEMPO uses 0.5")
     a = ap.parse_args(argv)
 
     from transformers import Trainer, TrainingArguments
@@ -124,7 +223,9 @@ def main(argv=None):
     val = load_examples(Path(a.val)) if a.val else None
     print(f"[train] {len(train)} examples" + (f", {len(val)} val" if val else ""))
 
-    model, processor = build_model(a.model_id, a.precision, a.lora_r, a.lora_alpha, a.lora_dropout)
+    model, processor, vocab = build_model(a.model_id, a.precision, a.lora_r, a.lora_alpha,
+                                          a.lora_dropout, a.time_tokens, a.max_seconds,
+                                          a.resolution)
     collate = GroundingCollator(processor)
 
     args = TrainingArguments(
@@ -145,8 +246,13 @@ def main(argv=None):
         remove_unused_columns=False,
         dataloader_num_workers=2,
     )
-    trainer = Trainer(model=model, args=args, train_dataset=train, eval_dataset=val,
-                      data_collator=collate)
+    if a.time_tokens:
+        trainer = _make_time_trainer()(model=model, args=args, train_dataset=train,
+                                       eval_dataset=val, data_collator=collate)
+        trainer.configure_time_loss(processor.tokenizer, vocab, a.time_sigma, a.time_lambda)
+    else:
+        trainer = Trainer(model=model, args=args, train_dataset=train, eval_dataset=val,
+                          data_collator=collate)
     trainer.train()
     model.save_pretrained(a.out)
     processor.save_pretrained(a.out)

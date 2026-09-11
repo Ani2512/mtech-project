@@ -444,3 +444,159 @@ def test_hybrid_selects_on_val_and_reports_on_test(tmp_path):
     # reported only on test clips
     n_test = sum(1 for q in qids if assign(q.rsplit("_q", 1)[0], 0, 0.7, 0.15) == "test")
     assert res["n_test"] == n_test
+
+
+# ---------------------------------------------------------------- time tokens
+
+def test_time_vocab_size_and_quantisation():
+    from dhwani.timetokens import EMPTY_TOKEN, TimeVocab
+
+    v = TimeVocab(max_seconds=30.0, resolution=0.1)
+    assert len(v.times) == 301 and len(v.tokens) == 302      # + the empty token
+    assert v.tokens[0] == "<t=0.0>" and v.tokens[-2] == "<t=30.0>"
+    assert v.tokens[-1] == EMPTY_TOKEN
+    # quantisation error never exceeds half a step
+    for t in (0.0, 0.04, 0.06, 16.757, 29.99, 30.0):
+        assert abs(v.quantise(t) - t) <= v.resolution / 2 + 1e-9
+    # out of range clamps rather than throwing
+    assert v.quantise(-5) == 0.0 and v.quantise(999) == 30.0
+    # halves round up consistently; round() would send 0.65 down to 0.6 and
+    # float error makes 3.15/0.1 = 31.4999... which a plain round drops to 3.1
+    assert v.quantise(0.65) == 0.7
+    assert v.quantise(0.75) == 0.8
+    assert v.quantise(3.15) == 3.2
+    assert v.quantise(0.05) == 0.1
+
+
+def test_time_token_roundtrip():
+    from dhwani.timetokens import TimeVocab
+
+    v = TimeVocab(30.0, 0.1)
+    got = v.decode(v.encode([(0.65, 3.15), (8.87, 11.37)]))
+    assert got == [(0.7, 3.2), (8.9, 11.4)]                  # quantised, order kept
+    assert v.encode([]) == "<t=none>"
+    assert v.decode("<t=none>") == []
+    assert v.decode("no tokens here") is None
+    # a reversed pair is normalised, like the text parser does
+    assert v.decode(v.encode([(3.0, 1.0)])) == [(1.0, 3.0)]
+
+
+def test_time_tokens_are_one_token_each_for_the_real_tokenizer_contract():
+    """The whole point is one categorical decision per timestamp. This checks the
+    string form is atomic and unambiguous, which is what lets add_tokens make it
+    a single id."""
+    from dhwani.timetokens import TimeVocab
+
+    v = TimeVocab(20.0, 0.1)
+    enc = v.encode([(1.2, 3.4)])
+    assert enc == "<t=1.2><t=3.4>"
+    assert len(v.decode(enc)) == 1
+    assert len(set(v.tokens)) == len(v.tokens)               # no duplicates
+
+
+def test_gaussian_soft_labels_reward_near_misses():
+    """Cross-entropy on a one-hot target calls 0.1 s off exactly as wrong as
+    10 s off. TEMPO's soft target is what makes the vocabulary ordinal."""
+    from dhwani.timetokens import TimeVocab
+
+    v = TimeVocab(30.0, 0.1)
+    q = v.soft_labels(10.0, sigma=0.3)
+    assert abs(sum(q) - 1.0) < 1e-9
+    assert q[-1] == 0.0                                      # empty token gets no mass
+    peak = max(range(len(q)), key=lambda i: q[i])
+    assert abs(v.times[peak] - 10.0) < 1e-9                  # peaks at the target
+    # monotone decay with distance, and symmetric
+    assert q[v.index(10.1)] > q[v.index(10.5)] > q[v.index(12.0)]
+    assert abs(q[v.index(9.7)] - q[v.index(10.3)]) < 1e-9
+    # a tighter sigma concentrates mass
+    assert v.soft_labels(10.0, 0.1)[v.index(10.0)] > q[v.index(10.0)]
+
+
+def test_soft_labels_survive_a_target_outside_the_range():
+    from dhwani.timetokens import TimeVocab
+
+    v = TimeVocab(5.0, 0.1)
+    q = v.soft_labels(500.0, sigma=0.3)
+    assert abs(sum(q) - 1.0) < 1e-9
+    assert q[v.index(500.0)] == 1.0                          # clamped to the last step
+
+
+def test_time_token_answers_parse_through_the_scoring_path():
+    """A fine-tuned model emits these; the runner must score them without
+    special-casing, or the two arms are not comparable."""
+    from dhwani.timetokens import TimeVocab
+
+    v = TimeVocab(30.0, 0.1)
+    gold = [(1.0, 2.0), (5.0, 6.0)]
+    pred = v.decode(v.encode(gold))
+    s = score_query(pred, gold, False)
+    assert s["f1@0.5"] == 1.0 and not s["parse_fail"]
+
+
+def test_parse_intervals_reads_time_tokens_without_special_casing():
+    """The runner must score a time-token model through the same path as a
+    text model, or the two arms are not comparable."""
+    assert parse_intervals("<t=1.2><t=3.4>") == [(1.2, 3.4)]
+    assert parse_intervals("<t=none>") == []
+    assert parse_intervals("<t=0.7><t=3.2><t=8.9><t=11.4>") == [(0.7, 3.2), (8.9, 11.4)]
+    # plain text still works, unchanged
+    assert parse_intervals("[[1.2, 2.0]]") == [(1.2, 2.0)]
+
+
+def test_sft_data_can_emit_time_token_targets(tmp_path):
+    import json as _json
+    from dhwani.build_benchmark import build as build_bench
+    from dhwani.sft_data import build as build_sft
+    from dhwani.split import split_benchmark
+
+    build_bench("procedural", 20, tmp_path / "b", seed=7)
+    split_benchmark(tmp_path / "b" / "benchmark.jsonl", tmp_path / "b", seed=0)
+    s = build_sft(tmp_path / "b" / "benchmark_train.jsonl", tmp_path / "b" / "timelines.jsonl",
+                  tmp_path / "sft_tt.jsonl", plain_ratio=0.5, seed=0, time_tokens=True)
+    assert s["time_tokens"] is True
+    rows = [_json.loads(l) for l in open(tmp_path / "sft_tt.jsonl")]
+    assert any("<t=" in r["target"] for r in rows)
+    # every target must survive the scoring parser, empty ones included
+    for r in rows:
+        assert parse_intervals(r["target"]) is not None
+    assert any(r["target"] == "<t=none>" for r in rows)
+
+
+def test_time_loss_rewards_near_misses_and_ignores_non_timestamp_positions():
+    """The distance-aware loss is the reason an ordinal vocabulary helps. If it
+    reduced to plain cross-entropy the timestamp tokens would be no better than
+    digits, and nothing downstream would reveal it."""
+    import torch
+
+    from dhwani.timetokens import TimeVocab
+    from dhwani.train_lora import time_loss_terms
+
+    v = TimeVocab(max_seconds=2.0, resolution=0.1)        # 21 times + empty
+    T = len(v.times)
+    time_ids = torch.arange(100, 100 + T)                 # pretend ids
+    Q = torch.tensor([v.soft_labels(t, 0.3)[:-1] for t in v.times], dtype=torch.float)
+
+    V = 200
+    target_time_idx = v.index(1.0)
+    target_id = int(time_ids[target_time_idx])
+
+    def loss_for(pred_time):
+        logits = torch.full((1, 3, V), -10.0)
+        logits[0, 0, int(time_ids[v.index(pred_time)])] = 10.0   # position 0 predicts label 1
+        labels = torch.tensor([[-100, target_id, -100]])
+        return time_loss_terms(logits, labels, time_ids, Q)[0].item()
+
+    exact = loss_for(1.0)
+    near = loss_for(1.1)
+    far = loss_for(2.0)
+    assert exact < near < far, (exact, near, far)
+
+    # positions whose label is not a timestamp contribute nothing
+    logits = torch.zeros((1, 3, V))
+    labels = torch.tensor([[-100, 5, -100]])              # id 5 is not a time token
+    loss, n = time_loss_terms(logits, labels, time_ids, Q)
+    assert n == 0 and float(loss) == 0.0
+
+    # masked positions are excluded even when the id collides with a time token
+    labels = torch.tensor([[-100, -100, -100]])
+    assert time_loss_terms(logits, labels, time_ids, Q)[1] == 0

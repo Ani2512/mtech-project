@@ -25,13 +25,26 @@ from pathlib import Path
 from .models import SYSTEM, prompt_for
 
 
-def target_string(intervals) -> str:
-    """Exactly the format the parser expects and the metric scores."""
+_TIME_VOCAB = None
+
+
+def target_string(intervals, time_tokens: bool = False) -> str:
+    """Exactly the format the parser expects and the metric scores.
+
+    With time_tokens, emit atomic timestamp tokens instead of digit strings;
+    see dhwani/timetokens.py for why and for the prior work it follows.
+    """
+    if time_tokens:
+        global _TIME_VOCAB
+        if _TIME_VOCAB is None:
+            from .timetokens import TimeVocab
+            _TIME_VOCAB = TimeVocab()
+        return _TIME_VOCAB.encode(intervals)
     return json.dumps([[round(float(a), 2), round(float(b), 2)] for a, b in intervals])
 
 
 def example(audio: str, query_text: str, answer, duration: float | None = None,
-            kind: str = "conditional") -> dict:
+            kind: str = "conditional", time_tokens: bool = False) -> dict:
     return {
         "audio": audio,
         "kind": kind,          # 'plain' or 'conditional'; lets the mix be audited
@@ -39,7 +52,7 @@ def example(audio: str, query_text: str, answer, duration: float | None = None,
             {"role": "system", "content": SYSTEM},
             {"role": "user", "content": prompt_for(query_text, duration)},
         ],
-        "target": target_string(answer),
+        "target": target_string(answer, time_tokens),
     }
 
 
@@ -49,7 +62,7 @@ PLAIN_TEMPLATES = ["every {X}", "all occurrences of {X}", "each time there is {X
 
 def synth_plain(timelines: dict, clip_ids: set[str], audio_of: dict[str, str],
                 rng: random.Random, per_clip_absent: int = 1,
-                vocab: list[str] | None = None) -> list[dict]:
+                vocab: list[str] | None = None, time_tokens: bool = False) -> list[dict]:
     """One PLAIN example per (clip, label present), plus a few absent-sound
     examples so the model learns that an empty answer is legitimate."""
     out = []
@@ -68,17 +81,19 @@ def synth_plain(timelines: dict, clip_ids: set[str], audio_of: dict[str, str],
             iv = [(e["onset"], e["offset"]) for e in tl["events"] if e["label"] == lab]
             phrase = lab.replace("_", " ")
             t = rng.choice(PLAIN_TEMPLATES).format(X=phrase)
-            out.append(example(audio, t, sorted(iv), tl.get("duration"), kind="plain"))
+            out.append(example(audio, t, sorted(iv), tl.get("duration"), kind="plain",
+                               time_tokens=time_tokens))
         if vocab:
             absent = [l for l in vocab if l not in labels]
             for lab in rng.sample(absent, min(per_clip_absent, len(absent))):
                 t = rng.choice(PLAIN_TEMPLATES).format(X=lab.replace("_", " "))
-                out.append(example(audio, t, [], tl.get("duration"), kind="plain"))
+                out.append(example(audio, t, [], tl.get("duration"), kind="plain",
+                                   time_tokens=time_tokens))
     return out
 
 
 def build(bench: Path, timelines: Path, out: Path, plain_ratio: float = 0.5,
-          seed: int = 0, augment_plain: bool = True) -> dict:
+          seed: int = 0, augment_plain: bool = True, time_tokens: bool = False) -> dict:
     rng = random.Random(seed)
     rows = [json.loads(l) for l in open(bench, encoding="utf-8")]
     tl, audio_of = {}, {}
@@ -91,14 +106,15 @@ def build(bench: Path, timelines: Path, out: Path, plain_ratio: float = 0.5,
     vocab = sorted({e["label"] for d in tl.values() for e in d["events"]})
 
     from_bench = [example(r["audio"], r["text"], r["answer"], r.get("duration"),
-                          kind="plain" if r["qtype"] in ("PLAIN", "ABSENT") else "conditional")
+                          kind="plain" if r["qtype"] in ("PLAIN", "ABSENT") else "conditional",
+                          time_tokens=time_tokens)
                   for r in rows]
     plain_bench = [e for e in from_bench if e["kind"] == "plain"]
     cond_bench = [e for e in from_bench if e["kind"] == "conditional"]
 
     plain = list(plain_bench)
     if augment_plain:
-        plain += synth_plain(tl, clip_ids, audio_of, rng, vocab=vocab)
+        plain += synth_plain(tl, clip_ids, audio_of, rng, vocab=vocab, time_tokens=time_tokens)
 
     # hit the requested plain share by trimming whichever side is over-represented
     if plain_ratio <= 0:
@@ -128,7 +144,8 @@ def build(bench: Path, timelines: Path, out: Path, plain_ratio: float = 0.5,
         "plain_pool": len(plain),
         "conditional_pool": len(cond_bench),
         "synthesised_plain": len(plain) - len(plain_bench),
-        "empty_targets": sum(1 for e in chosen if e["target"] == "[]"),
+        "empty_targets": sum(1 for e in chosen if e["target"] in ("[]", "<t=none>")),
+        "time_tokens": time_tokens,
         "clips": len(clip_ids),
     }
     return stats
@@ -142,9 +159,12 @@ def main(argv=None):
     ap.add_argument("--plain-ratio", type=float, default=0.5,
                     help="share of training examples that are plain grounding (default 0.5)")
     ap.add_argument("--no-augment", action="store_true")
+    ap.add_argument("--time-tokens", action="store_true",
+                    help="emit atomic timestamp tokens instead of digit strings")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args(argv)
-    s = build(Path(a.bench), Path(a.timelines), Path(a.out), a.plain_ratio, a.seed, not a.no_augment)
+    s = build(Path(a.bench), Path(a.timelines), Path(a.out), a.plain_ratio, a.seed,
+              not a.no_augment, a.time_tokens)
     print(json.dumps(s, indent=2))
 
 
