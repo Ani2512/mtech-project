@@ -24,10 +24,21 @@ from pathlib import Path
 
 
 def _bf16_ok() -> bool:
+    """True only where bf16 runs on the hardware, not where it is emulated.
+
+    torch.cuda.is_bf16_supported() takes including_emulation=True by default, so
+    on a T4 (sm_75, no native bf16) it returns True and selecting bf16 gives
+    emulated arithmetic. That cost roughly a 5x slowdown on the first run: 16-19
+    seconds per step against 3.1-3.5 with fp16. Ampere is sm_80, so require
+    capability 8.0 or above and ignore the emulation answer entirely.
+    """
     try:
         import torch
 
-        return torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+        if not torch.cuda.is_available():
+            return False
+        major, _ = torch.cuda.get_device_capability()
+        return major >= 8
     except Exception:
         return False
 
@@ -267,6 +278,9 @@ def main(argv=None):
     val = load_examples(Path(a.val)) if a.val else None
     print(f"[train] {len(train)} examples" + (f", {len(val)} val" if val else ""))
 
+    bf16 = _bf16_ok()
+    print(f"[train] mixed precision: {'bf16' if bf16 else 'fp16'}"
+          + ("" if bf16 else " (card has no native bf16; emulated bf16 is ~5x slower)"))
     model, processor, vocab = build_model(a.model_id, a.precision, a.lora_r, a.lora_alpha,
                                           a.lora_dropout, a.time_tokens, a.max_seconds,
                                           a.resolution)
@@ -287,7 +301,7 @@ def main(argv=None):
         # bf16 where the card supports it (Ampere and later); fp16 otherwise.
         # bf16 has the same range as fp32 and removes the overflow that makes
         # QLoRA produce nan gradients.
-        bf16=_bf16_ok(), fp16=not _bf16_ok(),
+        bf16=bf16, fp16=not bf16,
         gradient_checkpointing=True,
         report_to=[],
         remove_unused_columns=False,

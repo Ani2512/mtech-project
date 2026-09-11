@@ -769,3 +769,36 @@ def test_every_called_name_in_the_package_resolves():
                     problems.append(f"{path.name}:{node.lineno} calls undefined {node.func.id}()")
 
     assert not problems, "undefined calls:\n  " + "\n  ".join(problems)
+
+
+def test_bf16_is_rejected_when_only_emulated():
+    """torch.cuda.is_bf16_supported() defaults to including_emulation=True, so a
+    T4 answers yes and emulated bf16 runs about 5x slower than fp16. The check
+    must look at compute capability instead."""
+    import sys
+    import types
+
+    from dhwani import train_lora
+
+    real = sys.modules.get("torch")
+    try:
+        for major, expect, name in [(7, False, "T4 / sm_75"), (8, True, "A100 / sm_80"),
+                                    (9, True, "H100 / sm_90"), (6, False, "P100 / sm_60")]:
+            sys.modules["torch"] = types.SimpleNamespace(
+                cuda=types.SimpleNamespace(
+                    is_available=lambda: True,
+                    get_device_capability=lambda m=major: (m, 0),
+                    # deliberately claims support, as the emulating version does
+                    is_bf16_supported=lambda **kw: True,
+                )
+            )
+            assert train_lora._bf16_ok() is expect, name
+        # no GPU at all
+        sys.modules["torch"] = types.SimpleNamespace(
+            cuda=types.SimpleNamespace(is_available=lambda: False))
+        assert train_lora._bf16_ok() is False
+    finally:
+        if real is not None:
+            sys.modules["torch"] = real
+        else:
+            sys.modules.pop("torch", None)
