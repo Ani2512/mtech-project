@@ -31,7 +31,7 @@ class MockBackend:
         self.mode, self.rng = mode, random.Random(seed)
         self.name = f"mock:{mode}"
 
-    def ground(self, audio_path, query_text, query=None, duration=None):
+    def ground(self, audio_path, query_text, query=None, duration=None, temperature=None):
         assert query is not None, "mock backends need the Query object"
         if self.mode == "oracle":
             iv = query.answer
@@ -127,7 +127,7 @@ class Qwen25OmniBackend:
         else:
             self.processor = Qwen2_5OmniProcessor.from_pretrained(model_id)
 
-    def ground(self, audio_path, query_text, query=None, duration=None):
+    def ground(self, audio_path, query_text, query=None, duration=None, temperature=None):
         from qwen_omni_utils import process_mm_info
 
         conv = [
@@ -146,7 +146,9 @@ class Qwen25OmniBackend:
             #   AttributeError: 'Qwen2_5OmniForConditionalGeneration' object has no attribute 'talker'
             # The text path inside that method is exactly self.thinker.generate(...),
             # which is what we want and which skips the broken branch.
-            ids = self.model.thinker.generate(**inputs, max_new_tokens=self.max_new_tokens, do_sample=False)
+            gen = ({"do_sample": True, "temperature": temperature} if temperature
+                   else {"do_sample": False})
+            ids = self.model.thinker.generate(**inputs, max_new_tokens=self.max_new_tokens, **gen)
         ids = ids[:, inputs["input_ids"].shape[1]:]
         return self.processor.batch_decode(ids, skip_special_tokens=True)[0].strip()
 
@@ -166,7 +168,7 @@ class Qwen2AudioBackend:
         self.model = Qwen2AudioForConditionalGeneration.from_pretrained(model_id, **kw).eval()
         self.sr = self.processor.feature_extractor.sampling_rate
 
-    def ground(self, audio_path, query_text, query=None, duration=None):
+    def ground(self, audio_path, query_text, query=None, duration=None, temperature=None):
         import librosa
 
         audio, _ = librosa.load(audio_path, sr=self.sr)
@@ -177,7 +179,9 @@ class Qwen2AudioBackend:
         text = self.processor.apply_chat_template(conv, add_generation_prompt=True, tokenize=False)
         inputs = self.processor(text=text, audio=[audio], sampling_rate=self.sr, return_tensors="pt", padding=True).to(self.model.device)
         with self.torch.no_grad():
-            ids = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens, do_sample=False)
+            gen = ({"do_sample": True, "temperature": temperature} if temperature
+                   else {"do_sample": False})
+            ids = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens, **gen)
         ids = ids[:, inputs.input_ids.size(1):]
         return self.processor.batch_decode(ids, skip_special_tokens=True)[0].strip()
 
@@ -191,7 +195,7 @@ class GeminiBackend:
         self.client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
         self.model_id = model_id
 
-    def ground(self, audio_path, query_text, query=None, duration=None):
+    def ground(self, audio_path, query_text, query=None, duration=None, temperature=None):
         from google.genai import types
 
         data = open(audio_path, "rb").read()

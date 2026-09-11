@@ -26,6 +26,12 @@ def main(argv=None):
     ap.add_argument("--max-new-tokens", type=int, default=96,
                     help="an interval list is short; 96 is ample and keeps decoding fast")
     ap.add_argument("--adapter", default=None, help="path to a LoRA adapter from dhwani.train_lora")
+    ap.add_argument("--samples", type=int, default=1,
+                    help="sample k answers and union them; raises recall, which the "
+                         "measured 5.6x miss/false-alarm asymmetry makes a good trade")
+    ap.add_argument("--temperature", type=float, default=0.7, help="only used when --samples > 1")
+    ap.add_argument("--min-votes", type=int, default=1,
+                    help="an interval must appear in this many samples to be kept")
     a = ap.parse_args(argv)
 
     out = Path(a.out)
@@ -47,8 +53,17 @@ def main(argv=None):
                 continue
             audio, duration = d.pop("audio"), d.pop("duration")
             q = Query.from_dict(d)
-            raw = backend.ground(audio, q.text, query=q, duration=duration)
-            pred = parse_intervals(raw)
+            if a.samples > 1:
+                raws = [backend.ground(audio, q.text, query=q, duration=duration,
+                                       temperature=a.temperature) for _ in range(a.samples)]
+                from .recall_bias import union_decode
+                parsed = [parse_intervals(r) for r in raws]
+                # all unparseable means a genuine failure; otherwise ignore the duds
+                pred = None if all(p is None for p in parsed) else union_decode(parsed, a.min_votes)
+                raw = json.dumps(raws)
+            else:
+                raw = backend.ground(audio, q.text, query=q, duration=duration)
+                pred = parse_intervals(raw)
             s = score_query(pred, q.answer, q.expects_empty)
             row = {"qid": q.qid, "qtype": q.qtype, "text": q.text, "answer": q.answer, "raw": raw, "pred": pred, **s}
             rows.append(row)

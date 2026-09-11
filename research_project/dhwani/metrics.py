@@ -216,7 +216,11 @@ def score_query(pred: list[Interval] | None, gt: list[Interval], expects_empty: 
     p5 = matched_f1(p, gt, 0.5)
     p7 = matched_f1(p, gt, 0.7)
     dists, dur_ratio = localisation(p, gt)
+    from .recall_bias import MEASURED_BETA, f_beta
     return {
+        # F-beta with beta from the measured downstream asymmetry: a missed event
+        # costs 5.6x a spurious one for composition, which f1 hides entirely.
+        "f_beta": 0.0 if parse_fail else f_beta(p, gt, MEASURED_BETA),
         "centre_errors": dists,
         "duration_ratio": dur_ratio,
         "parse_fail": parse_fail,
@@ -259,6 +263,7 @@ def summarize(rows: list[dict], key: str = "qtype") -> dict:
             "union_iou": float(np.mean([r["union_iou"] for r in nonemp])) if nonemp else None,
             "f1@0.5": float(np.mean([r["f1@0.5"] for r in nonemp])) if nonemp else None,
             "f1@0.7": float(np.mean([r["f1@0.7"] for r in nonemp])) if nonemp else None,
+            "f_beta": float(np.mean([r["f_beta"] for r in nonemp])) if nonemp else None,
             "count_acc": sum(r["count_acc"] for r in rs) / n,
             "under_report_rate": (sum(r["n_pred"] < r["n_gt"] for r in nonemp) / len(nonemp)) if nonemp else None,
             "rejection_precision": rej_p,

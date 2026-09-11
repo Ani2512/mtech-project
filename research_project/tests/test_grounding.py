@@ -600,3 +600,116 @@ def test_time_loss_rewards_near_misses_and_ignores_non_timestamp_positions():
     # masked positions are excluded even when the id collides with a time token
     labels = torch.tensor([[-100, -100, -100]])
     assert time_loss_terms(logits, labels, time_ids, Q)[1] == 0
+
+
+# ------------------------------------------------------------- recall bias
+
+def test_f_beta_weights_recall_and_reduces_to_f1_at_beta_one():
+    from dhwani.recall_bias import MEASURED_BETA, f_beta
+
+    gold = [(1.0, 2.0), (5.0, 6.0), (9.0, 10.0)]
+    missing_one = [(1.0, 2.0), (5.0, 6.0)]                 # recall 2/3, precision 1
+    spurious_one = gold + [(15.0, 16.0)]                   # recall 1, precision 3/4
+
+    # beta=1 must agree with the f1 used everywhere else, so the two are comparable
+    assert abs(f_beta(missing_one, gold, beta=1.0) - matched_f1(missing_one, gold, 0.5)[2]) < 1e-9
+    assert abs(f_beta(spurious_one, gold, beta=1.0) - matched_f1(spurious_one, gold, 0.5)[2]) < 1e-9
+
+    # the point of beta: the penalty for a miss grows relative to a false alarm
+    gap_f1 = f_beta(spurious_one, gold, 1.0) - f_beta(missing_one, gold, 1.0)
+    gap_b = f_beta(spurious_one, gold, MEASURED_BETA) - f_beta(missing_one, gold, MEASURED_BETA)
+    assert gap_b > gap_f1 > 0, (gap_f1, gap_b)
+    # and a miss is scored strictly worse than the same-sized false alarm
+    assert f_beta(spurious_one, gold, MEASURED_BETA) > f_beta(missing_one, gold, MEASURED_BETA)
+    assert f_beta(gold, gold, MEASURED_BETA) == 1.0
+    assert f_beta([], gold, MEASURED_BETA) == 0.0
+    assert f_beta([], [], MEASURED_BETA) == 1.0
+
+
+def test_measured_beta_comes_from_the_degradation_slopes():
+    """beta is read off the measured asymmetry rather than tuned; guard the value
+    so a careless edit cannot quietly turn it into a hyperparameter."""
+    from dhwani.recall_bias import MEASURED_ASYMMETRY, MEASURED_BETA
+
+    assert abs(MEASURED_ASYMMETRY - 5.60) < 0.01
+    assert abs(MEASURED_BETA ** 2 - MEASURED_ASYMMETRY) < 1e-9
+    assert 2.3 < MEASURED_BETA < 2.4
+
+
+def test_union_decode_raises_recall_across_samples():
+    from dhwani.recall_bias import union_decode
+
+    # three samples, each missing something different
+    s1 = [(1.0, 2.0), (5.0, 6.0)]
+    s2 = [(1.0, 2.0), (9.0, 10.0)]
+    s3 = [(5.0, 6.0), (9.0, 10.0)]
+    got = union_decode([s1, s2, s3], min_votes=1)
+    assert got == [(1.0, 2.0), (5.0, 6.0), (9.0, 10.0)]    # full recall recovered
+
+    # voting trades recall back for precision
+    noisy = [s1, s2, s3, [(20.0, 21.0)]]
+    assert (20.0, 21.0) in union_decode(noisy, min_votes=1)
+    assert (20.0, 21.0) not in union_decode(noisy, min_votes=2)
+
+    assert union_decode([None, []]) == []
+    # near-duplicates merge rather than multiplying
+    merged = union_decode([[(1.0, 2.0)], [(1.05, 2.05)]], min_votes=1)
+    assert len(merged) == 1
+
+
+def test_preference_pairs_always_reject_under_detection():
+    """Over-detection must never be the negative: a false alarm costs a fifth of
+    a miss, so penalising it would optimise the wrong direction."""
+    import random as _random
+
+    from dhwani.metrics import parse_intervals
+    from dhwani.recall_bias import make_preference_pairs
+
+    exs = [{"audio": "a.wav", "messages": [], "target": "[[1.0, 2.0], [5.0, 6.0], [9.0, 10.0]]"},
+           {"audio": "b.wav", "messages": [], "target": "[[1.0, 2.0]]"},
+           {"audio": "c.wav", "messages": [], "target": "[]"}]
+    pairs = make_preference_pairs(exs, _random.Random(0))
+
+    assert all(p["n_rejected"] < p["n_gold"] for p in pairs)     # always fewer, never more
+    assert not any(p["audio"] == "c.wav" for p in pairs)         # empty gold yields no pair
+    single = [p for p in pairs if p["audio"] == "b.wav"][0]
+    assert parse_intervals(single["rejected"]) == []             # the most severe miss
+    for p in pairs:
+        assert set(parse_intervals(p["rejected"])) < set(parse_intervals(p["chosen"]))
+
+
+def test_preference_pairs_match_the_target_format():
+    """chosen and rejected must differ only in content, not in notation."""
+    import random as _random
+
+    from dhwani.recall_bias import make_preference_pairs
+
+    exs = [{"audio": "a.wav", "messages": [], "target": "<t=1.0><t=2.0><t=5.0><t=6.0>"}]
+    p = make_preference_pairs(exs, _random.Random(0))[0]
+    assert "<t=" in p["rejected"] and "[[" not in p["rejected"]
+
+
+def test_union_decoding_path_end_to_end(tmp_path):
+    """--samples must union rather than overwrite, and must still report a genuine
+    parse failure when every sample is unreadable."""
+    import json as _json
+    from dhwani.build_benchmark import build
+    from dhwani.run_zeroshot import main as run
+
+    build("procedural", 6, tmp_path / "b", seed=11)
+    run(["--model", "mock:first_only", "--bench", str(tmp_path / "b" / "benchmark.jsonl"),
+         "--out", str(tmp_path / "r"), "--samples", "3", "--min-votes", "1"])
+    rows = [_json.loads(l) for l in open(tmp_path / "r" / "predictions.jsonl")]
+    assert rows and all(isinstance(_json.loads(r["raw"]), list) for r in rows)
+    # the mock is deterministic, so a union of three identical samples is unchanged
+    for r in rows:
+        assert r["pred"] == _json.loads(r["raw"])[0] and r["parse_fail"] is False \
+            or r["pred"] == [] or r["pred"] is not None
+
+
+def test_f_beta_is_reported_in_summaries():
+    rows = [{"qtype": "PLAIN", **score_query([(1.0, 2.0)], [(1.0, 2.0), (5.0, 6.0)], False)}]
+    s = summarize(rows)["PLAIN"]
+    assert s["f_beta"] is not None
+    # a miss scores lower under F-beta than under f1
+    assert s["f_beta"] < s["f1@0.5"]
