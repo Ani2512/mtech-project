@@ -261,6 +261,10 @@ def main(argv=None):
     ap.add_argument("--lora-alpha", type=int, default=64)
     ap.add_argument("--lora-dropout", type=float, default=0.05)
     ap.add_argument("--precision", default=None, choices=["fp16", "8bit", "4bit"])
+    ap.add_argument("--amp", default="none", choices=["none", "fp16", "bf16", "auto"],
+                    help="mixed precision. 'none' keeps gradients in fp32, which avoids the "
+                         "fp16 overflow that produces nan grad_norm without paying for "
+                         "emulated bf16 on pre-Ampere cards.")
     ap.add_argument("--max-steps", type=int, default=-1)
     ap.add_argument("--time-tokens", action="store_true",
                     help="atomic timestamp tokens plus the distance-aware Gaussian loss")
@@ -278,9 +282,18 @@ def main(argv=None):
     val = load_examples(Path(a.val)) if a.val else None
     print(f"[train] {len(train)} examples" + (f", {len(val)} val" if val else ""))
 
-    bf16 = _bf16_ok()
-    print(f"[train] mixed precision: {'bf16' if bf16 else 'fp16'}"
-          + ("" if bf16 else " (card has no native bf16; emulated bf16 is ~5x slower)"))
+    # Measured on a T4 with this model: emulated bf16 trains correctly but runs
+    # ~5x slower (18.3 s/step); fp16 runs at 3.5 s/step but overflows, giving
+    # nan grad_norm and a loss that collapses to zero. 'none' keeps the
+    # optimiser in fp32 and avoids both.
+    amp = a.amp
+    if amp == "auto":
+        amp = "bf16" if _bf16_ok() else "none"
+    bf16 = amp == "bf16"
+    fp16 = amp == "fp16"
+    print(f"[train] mixed precision: {amp}"
+          + ("  (fp16 overflows on this model; expect nan grad_norm)" if fp16 else "")
+          + ("  (emulated on pre-Ampere cards, ~5x slower)" if bf16 and not _bf16_ok() else ""))
     model, processor, vocab = build_model(a.model_id, a.precision, a.lora_r, a.lora_alpha,
                                           a.lora_dropout, a.time_tokens, a.max_seconds,
                                           a.resolution)
@@ -301,7 +314,7 @@ def main(argv=None):
         # bf16 where the card supports it (Ampere and later); fp16 otherwise.
         # bf16 has the same range as fp32 and removes the overflow that makes
         # QLoRA produce nan gradients.
-        bf16=bf16, fp16=not bf16,
+        bf16=bf16, fp16=fp16,
         gradient_checkpointing=True,
         report_to=[],
         remove_unused_columns=False,
@@ -316,15 +329,25 @@ def main(argv=None):
                           data_collator=collate)
     result = trainer.train()
 
-    # A nan grad_norm silently skips every optimiser step: the run "succeeds",
-    # the adapter saves, and nothing has been learned. Say so rather than let it
-    # pass as a completed job.
-    loss = float(result.training_loss) if result.training_loss is not None else float("nan")
-    if not (loss == loss) or loss == 0.0:
-        print(f"\n*** WARNING: training_loss = {loss}. The model did not train. "
-              f"Check for nan grad_norm in the log above; do not trust this adapter. ***\n")
-    else:
-        print(f"[train] final training loss {loss:.4f}")
+    # The averaged training_loss can look healthy while every step was skipped,
+    # which is how a run with nan grad_norm and a loss of 0 reported PASSED.
+    # Inspect the logged history instead.
+    history = [h for h in trainer.state.log_history if "grad_norm" in h or "loss" in h]
+    nan_grads = sum(1 for h in history
+                    if isinstance(h.get("grad_norm"), float) and h["grad_norm"] != h["grad_norm"])
+    zero_loss = sum(1 for h in history if h.get("loss") == 0.0)
+    losses = [h["loss"] for h in history if isinstance(h.get("loss"), (int, float))]
+
+    if nan_grads or zero_loss:
+        raise SystemExit(
+            f"\n*** TRAINING FAILED: {nan_grads} logged steps had nan grad_norm and "
+            f"{zero_loss} had loss exactly 0. Every such step was skipped, so the adapter "
+            f"at {a.out} has learned nothing. Try --amp none (or --amp bf16, which is "
+            f"correct but ~5x slower on pre-Ampere), or a lower --lr. ***\n")
+    if len(losses) >= 2 and losses[-1] >= losses[0]:
+        print(f"\n*** WARNING: loss did not decrease ({losses[0]:.4f} -> {losses[-1]:.4f}). ***\n")
+    print(f"[train] loss {losses[0]:.4f} -> {losses[-1]:.4f}" if len(losses) >= 2
+          else f"[train] final training loss {result.training_loss}")
 
     model.save_pretrained(a.out)
     processor.save_pretrained(a.out)

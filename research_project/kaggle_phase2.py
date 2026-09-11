@@ -22,6 +22,9 @@ os.environ.setdefault("HF_HOME", "/kaggle/temp/hf")
 os.chdir(WORK)
 
 EPOCHS = os.environ.get("DHWANI_EPOCHS", "1")
+# Which mixed-precision setting the bootstrap found to actually train on this card.
+AMP = os.environ.get("DHWANI_AMP", "none")
+print(f"[phase2] epochs={EPOCHS}  amp={AMP}")
 
 
 def run(label, cmd, produces):
@@ -42,7 +45,7 @@ ok = True
 ok &= run("train arm C (text timestamps)",
           ["dhwani.train_lora", "--data", "data/esc50/sft_train.jsonl",
            "--val", "data/esc50/sft_val.jsonl", "--out", "/kaggle/temp/lora_text",
-           "--epochs", EPOCHS],
+           "--epochs", EPOCHS, "--amp", AMP],
           "/kaggle/temp/lora_text/adapter_model.safetensors")
 ok &= run("eval arm C",
           ["dhwani.run_zeroshot", "--model", "qwen2.5-omni", "--adapter", "/kaggle/temp/lora_text",
@@ -53,7 +56,8 @@ ok &= run("eval arm C",
 ok &= run("train arm E (timestamp tokens)",
           ["dhwani.train_lora", "--data", "data/esc50/sft_train_tt.jsonl",
            "--val", "data/esc50/sft_val_tt.jsonl", "--out", "/kaggle/temp/lora_tt",
-           "--epochs", EPOCHS, "--time-tokens", "--time-sigma", "0.3", "--time-lambda", "0.5"],
+           "--epochs", EPOCHS, "--amp", AMP,
+           "--time-tokens", "--time-sigma", "0.3", "--time-lambda", "0.5"],
           "/kaggle/temp/lora_tt/adapter_model.safetensors")
 ok &= run("eval arm E",
           ["dhwani.run_zeroshot", "--model", "qwen2.5-omni", "--adapter", "/kaggle/temp/lora_tt",
