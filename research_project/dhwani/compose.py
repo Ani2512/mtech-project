@@ -10,8 +10,8 @@ the overlap probability, so WHILE queries are satisfiable by construction.
 from __future__ import annotations
 
 import csv
-import io
 import random
+import subprocess
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -84,15 +84,37 @@ class ESC50Bank:
         if (self.root / "meta" / "esc50.csv").exists():
             return
         self.root.mkdir(parents=True, exist_ok=True)
-        print(f"downloading ESC-50 to {self.root} (~600 MB)")
-        data = urllib.request.urlopen(self.URL).read()
-        with zipfile.ZipFile(io.BytesIO(data)) as z:
+        zpath = self.root / "esc50.zip"
+        if not zpath.exists() or zpath.stat().st_size < 1_000_000:
+            print(f"downloading ESC-50 to {self.root} (~600 MB, once)")
+            self._fetch(self.URL, zpath)
+        with zipfile.ZipFile(zpath) as z:
             for m in z.namelist():
                 rel = m.split("/", 1)[1] if "/" in m else m
                 if rel.startswith(("audio/", "meta/")) and not m.endswith("/"):
                     dest = self.root / rel
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     dest.write_bytes(z.read(m))
+        if not (self.root / "meta" / "esc50.csv").exists():
+            raise RuntimeError(f"ESC-50 extracted but meta/esc50.csv missing under {self.root}")
+        zpath.unlink(missing_ok=True)
+
+    @staticmethod
+    def _fetch(url: str, dest: Path):
+        """urllib first; fall back to curl/wget, which carry system CA certs.
+        macOS pythons often lack certs and raise CERTIFICATE_VERIFY_FAILED."""
+        try:
+            urllib.request.urlretrieve(url, dest)
+            return
+        except Exception as e:  # noqa: BLE001 - any transport failure falls through
+            print(f"  urllib failed ({type(e).__name__}: {e}); trying curl")
+        for cmd in (["curl", "-fsSL", url, "-o", str(dest)], ["wget", "-q", url, "-O", str(dest)]):
+            try:
+                if subprocess.run(cmd, check=False).returncode == 0 and dest.exists():
+                    return
+            except FileNotFoundError:
+                continue
+        raise RuntimeError(f"could not download {url}; fetch it by hand and place it at {dest}")
 
     def labels(self):
         return list(self.classes)
@@ -118,32 +140,63 @@ class ESC50Bank:
 
 
 # ---------------------------------------------------------------- placement
+def _label_sequence(labels: list[str], n_events: int, rng: random.Random) -> list[str]:
+    """A sequence over `labels` guaranteeing at least one label occurring >=2 times
+    (so ORDINAL queries are meaningful) and at least one occurring exactly once
+    (so AFTER/BEFORE/NEXT_AFTER have an unambiguous reference). Adjacent duplicates
+    are separated where possible, because the placer will not overlap two events of
+    the same label and adjacent duplicates would suppress WHILE conditions."""
+    repeated, unique = labels[0], labels[1]
+    seq = [repeated, repeated, unique]
+    pool = [l for l in labels if l != unique]
+    seq += [rng.choice(pool) for _ in range(max(0, n_events - len(seq)))]
+    rng.shuffle(seq)
+    # de-adjacent: swap a duplicate neighbour forward with the next differing label
+    for i in range(1, len(seq)):
+        if seq[i] == seq[i - 1]:
+            for j in range(i + 1, len(seq)):
+                if seq[j] != seq[i - 1] and (j + 1 >= len(seq) or seq[j + 1] != seq[i]):
+                    seq[i], seq[j] = seq[j], seq[i]
+                    break
+    return seq
+
+
 def compose_clip(bank, rng: random.Random, duration: float = 20.0, n_events: int = 6, n_labels: int = 3,
                  p_overlap: float = 0.35, min_overlap: float = 0.3, snr_db: float = 20.0):
-    """Place n_events drawn from n_labels classes; with prob p_overlap an event
-    is started inside the previous one (overlap >= min_overlap). Returns (audio, Timeline)."""
+    """Place n_events drawn from n_labels classes. With probability p_overlap an event
+    starts inside the previous one, overlapping it by at least min_overlap seconds, which
+    is what makes WHILE conditions satisfiable by construction. Returns (audio, Timeline)."""
     labels = rng.sample(bank.labels(), n_labels)
-    # guarantee at least one repeated label and at least one unique label
-    seq = labels + [rng.choice(labels[:1]) for _ in range(n_events - n_labels)]
-    rng.shuffle(seq)
+    seq = _label_sequence(labels, n_events, rng)
+
     audio = np.zeros(int(duration * SR), dtype=np.float32)
     events: list[Event] = []
-    t = rng.uniform(0.3, 1.0)
-    prev = None
+    cursor = rng.uniform(0.3, 1.0)   # next free time for sequential placement
+    prev: Event | None = None
+
     for lab in seq:
         x = bank.sample(lab)
         d = len(x) / SR
-        if prev is not None and rng.random() < p_overlap and prev.label != lab:
-            t = rng.uniform(prev.onset, max(prev.onset, prev.offset - min_overlap))
+        overlap_ok = (prev is not None and prev.label != lab
+                      and (prev.offset - prev.onset) > min_overlap
+                      and rng.random() < p_overlap)
+        if overlap_ok:
+            # start inside prev, leaving at least min_overlap of shared time
+            latest = prev.offset - min_overlap
+            t = rng.uniform(prev.onset + 0.05, latest) if latest > prev.onset + 0.05 else prev.onset
         elif prev is not None:
-            t = prev.offset + rng.uniform(0.4, 2.5)
+            t = cursor + rng.uniform(0.4, 2.5)
+        else:
+            t = cursor
         if t + d > duration - 0.2:
-            break
+            continue                  # skip this one, keep trying later labels
         s = int(t * SR)
         audio[s: s + len(x)] += x
         ev = Event(lab, round(t, 3), round(t + d, 3))
         events.append(ev)
+        cursor = max(cursor, ev.offset)
         prev = ev
+
     # background noise at the requested SNR
     sig = np.sqrt(np.mean(audio ** 2)) + 1e-9
     noise = np.random.default_rng(rng.randrange(1 << 30)).standard_normal(len(audio)).astype(np.float32)
