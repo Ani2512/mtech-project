@@ -143,8 +143,13 @@ def summarize(rows: list[dict], key: str = "qtype") -> dict:
         nonemp = [r for r in rs if not r["expects_empty"]]
         pred_emp = [r for r in rs if r["pred_empty"]]
         correct_emp = [r for r in emp if r["pred_empty"]]
-        rej_p = len(correct_emp) / len(pred_emp) if pred_emp else 0.0
-        rej_r = len(correct_emp) / len(emp) if emp else 0.0
+        # With no rejection queries of this type there is nothing to reject, so the
+        # rejection metrics are undefined. Reporting 0.0 would read as a failure at
+        # a task that was never posed; over-rejection is covered by
+        # false_rejection_rate instead.
+        has_rej = bool(emp)
+        rej_p = (len(correct_emp) / len(pred_emp) if pred_emp else 0.0) if has_rej else None
+        rej_r = (len(correct_emp) / len(emp)) if has_rej else None
         out[g] = {
             "n": n,
             "n_rejection_queries": len(emp),
@@ -156,7 +161,8 @@ def summarize(rows: list[dict], key: str = "qtype") -> dict:
             "under_report_rate": (sum(r["n_pred"] < r["n_gt"] for r in nonemp) / len(nonemp)) if nonemp else None,
             "rejection_precision": rej_p,
             "rejection_recall": rej_r,
-            "rejection_f1": (2 * rej_p * rej_r / (rej_p + rej_r)) if rej_p + rej_r else 0.0,
+            "rejection_f1": (2 * rej_p * rej_r / (rej_p + rej_r)
+                             if has_rej and (rej_p + rej_r) else (None if not has_rej else 0.0)),
             "false_rejection_rate": (sum(r["pred_empty"] for r in nonemp) / len(nonemp)) if nonemp else None,
         }
     return out

@@ -94,3 +94,27 @@ def test_end_to_end_procedural(tmp_path):
             assert s["ALL"]["f1@0.5"] == 1.0 and s["ALL"]["count_acc"] == 1.0
         if mode == "first_only":
             assert s["PLAIN"]["under_report_rate"] > 0
+
+
+def test_rejection_metrics_are_none_when_no_rejection_queries():
+    """A type with no empty-answer queries was never asked to reject; reporting
+    0.0 would read as a failure at a task that was never posed."""
+    rows = [{"qtype": "PLAIN", **score_query([(1, 2)], [(1, 2)], False)},
+            {"qtype": "PLAIN", **score_query([(5, 6)], [(5, 6)], False)}]
+    s = summarize(rows)["PLAIN"]
+    assert s["n_rejection_queries"] == 0
+    assert s["rejection_f1"] is None and s["rejection_precision"] is None and s["rejection_recall"] is None
+    assert s["false_rejection_rate"] == 0.0
+
+    # and a false rejection still shows up in false_rejection_rate
+    rows.append({"qtype": "PLAIN", **score_query([], [(9, 10)], False)})
+    s = summarize(rows)["PLAIN"]
+    assert s["rejection_f1"] is None
+    assert abs(s["false_rejection_rate"] - 1 / 3) < 1e-9
+
+
+def test_rejection_metrics_present_when_type_has_rejection_queries():
+    rows = [{"qtype": "ABSENT", **score_query([], [], True)},
+            {"qtype": "ABSENT", **score_query([(1, 2)], [], True)}]
+    s = summarize(rows)["ABSENT"]
+    assert s["rejection_recall"] == 0.5 and s["rejection_f1"] is not None
