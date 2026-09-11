@@ -1,0 +1,14 @@
+# Phase 1 run matrix. Each entry maps to one run_baseline invocation.
+prompt: >-
+  Transcribe this Hindi-English (Hinglish) speech exactly as spoken. Do not translate.
+  Keep English words in Roman script and Hindi words in Devanagari.
+runs:
+  - {model: qwen2-audio, dataset: hiacc, split: adult,    n: 400}
+  - {model: qwen2-audio, dataset: hiacc, split: children, n: 400}
+  - {model: shuka,       dataset: hiacc, split: adult,    n: 400}
+  - {model: shuka,       dataset: hiacc, split: children, n: 400}
+  - {model: qwen2-audio, dataset: mucs,  split: test,     n: 500}
+  - {model: shuka,       dataset: mucs,  split: test,     n: 500}
+  # monolingual Hindi control: mode rates here should be ~0 except OTHER
+  - {model: qwen2-audio, dataset: indicvoices, split: valid, n: 300}
+  - {model: shuka,       dataset: indicvoices, split: valid, n: 300}

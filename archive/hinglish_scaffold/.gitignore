@@ -1,0 +1,6 @@
+runs/
+data/
+*.wav
+*.tar.gz
+__pycache__/
+.pytest_cache/
