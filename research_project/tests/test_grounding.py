@@ -317,63 +317,50 @@ def test_sft_targets_are_parseable_by_the_metric(tmp_path):
         assert parse_intervals(e["target"]) is not None
 
 
-def test_collator_masks_the_prompt_and_keeps_the_answer(tmp_path):
-    """Loss must fall only on the answer. If the mask is off by even one token
-    the model learns to echo our instruction text, and nothing about the metric
-    would reveal it."""
-    import numpy as np
-    import soundfile as sf
+def _stub_processor(expansion: int, answer_tokens: int):
+    """Processor stub that EXPANDS the audio placeholder, like the real one.
+
+    The first version of these tests used a stub with no expansion, so a mask
+    computed from the text prompt length looked correct. On real audio the
+    placeholder becomes hundreds of positions, the mask fell far short, and
+    training produced NaN gradients. Any stub here must expand.
+    """
     import torch
 
-    from dhwani.train_lora import GroundingCollator
-
-    wav = tmp_path / "clip.wav"
-    sf.write(wav, np.zeros(16000, dtype="float32"), 16000)
-
-    class StubTokenizer:
+    class Tok:
         pad_token_id = 0
-        eos_token = " <eos>"
+        eos_token = ""
 
         def __call__(self, text, add_special_tokens=False):
             class R: pass
-            r = R(); r.input_ids = text.split()
+            r = R(); r.input_ids = list(range(len(text.split())))
             return r
 
-    class StubProcessor:
-        tokenizer = StubTokenizer()
+    class P:
+        tokenizer = Tok()
 
         def apply_chat_template(self, conv, add_generation_prompt=True, tokenize=False):
-            # one token per word keeps the arithmetic checkable by hand
-            return "P1 P2 P3 P4"
+            return "PROMPT <audio> HERE"                 # 3 "words"
 
         def __call__(self, text, audio, sampling_rate, return_tensors, padding):
-            ids = [[hash(w) % 1000 + 1 for w in t.split()] for t in text]
-            width = max(len(i) for i in ids)
-            padded = [i + [0] * (width - len(i)) for i in ids]
-            return {"input_ids": torch.tensor(padded)}
+            rows = []
+            for t in text:
+                n_words = len(t.split())
+                # placeholder expands into `expansion` audio positions
+                ids = list(range(1, n_words + expansion))
+                rows.append(ids)
+            width = max(len(r) for r in rows)
+            ii = torch.tensor([r + [0] * (width - len(r)) for r in rows])
+            am = torch.tensor([[1] * len(r) + [0] * (width - len(r)) for r in rows])
+            return {"input_ids": ii, "attention_mask": am}
 
-    c = GroundingCollator(StubProcessor())
-    ex = {"audio": str(wav),
-          "messages": [{"role": "system", "content": "sys"},
-                       {"role": "user", "content": "Locate: every dog"}],
-          "target": "[[1.0, 2.0]]"}
-    batch = c([ex])
-    labels, input_ids = batch["labels"], batch["input_ids"]
-
-    # prompt is 4 tokens -> first 4 masked, the answer tokens survive
-    assert (labels[0, :4] == -100).all(), labels[0, :4]
-    assert (labels[0, 4:] != -100).any()
-    # surviving labels equal the inputs there (teacher forcing on the answer)
-    keep = labels[0] != -100
-    assert torch.equal(labels[0][keep], input_ids[0][keep])
-    # padding is masked too
-    pad = input_ids[0] == 0
-    if pad.any():
-        assert (labels[0][pad] == -100).all()
+    return P()
 
 
-def test_collator_masks_each_row_of_a_batch_independently(tmp_path):
-    """A shared mask length would leak answer tokens from the shorter prompt."""
+def test_collator_masks_survive_audio_placeholder_expansion(tmp_path):
+    """The real processor turns one audio placeholder into hundreds of positions.
+    A mask measured from the text prompt would cover a fraction of them and leave
+    the audio region as a training target, which is what produced NaN gradients."""
     import numpy as np
     import soundfile as sf
     import torch
@@ -383,33 +370,47 @@ def test_collator_masks_each_row_of_a_batch_independently(tmp_path):
     wav = tmp_path / "c.wav"
     sf.write(wav, np.zeros(16000, dtype="float32"), 16000)
 
-    class StubTokenizer:
-        pad_token_id = 0
-        eos_token = " <eos>"
+    for expansion in (1, 50, 400):
+        c = GroundingCollator(_stub_processor(expansion, 2))
+        ex = {"audio": str(wav),
+              "messages": [{"role": "user", "content": "Locate: every dog"}],
+              "target": "A B"}                            # 2 answer tokens
+        batch = c([ex])
+        labels, ids, attn = batch["labels"], batch["input_ids"], batch["attention_mask"]
+        end = int(attn[0].sum())
+        kept = (labels[0] != -100).nonzero().flatten().tolist()
+        # exactly the last two real tokens are trained on, whatever the expansion
+        assert kept == [end - 2, end - 1], (expansion, kept, end)
+        assert torch.equal(labels[0][kept], ids[0][kept])
+        # everything before, including the whole expanded audio region, is masked
+        assert (labels[0, :end - 2] == -100).all()
 
-        def __call__(self, text, add_special_tokens=False):
-            class R: pass
-            r = R(); r.input_ids = text.split()
-            return r
 
-    class StubProcessor:
-        tokenizer = StubTokenizer()
-        _n = [2, 5]                       # different prompt lengths per row
+def test_collator_masks_each_row_of_a_batch_independently(tmp_path):
+    """Rows have different answer lengths and different padding; a shared mask
+    would leak tokens from one row into another's loss."""
+    import numpy as np
+    import soundfile as sf
 
-        def apply_chat_template(self, conv, add_generation_prompt=True, tokenize=False):
-            return " ".join(f"P{i}" for i in range(self._n.pop(0)))
+    from dhwani.train_lora import GroundingCollator
 
-        def __call__(self, text, audio, sampling_rate, return_tensors, padding):
-            ids = [[i + 1 for i, _ in enumerate(t.split())] for t in text]
-            width = max(len(i) for i in ids)
-            return {"input_ids": torch.tensor([i + [0] * (width - len(i)) for i in ids])}
+    wav = tmp_path / "c.wav"
+    sf.write(wav, np.zeros(16000, dtype="float32"), 16000)
 
-    c = GroundingCollator(StubProcessor())
-    exs = [{"audio": str(wav), "messages": [{"role": "user", "content": "q"}], "target": "[]"},
-           {"audio": str(wav), "messages": [{"role": "user", "content": "q"}], "target": "[[1.0, 2.0]]"}]
-    labels = c(exs)["labels"]
-    assert (labels[0, :2] == -100).all() and (labels[0, 2:4] != -100).any()
-    assert (labels[1, :5] == -100).all() and (labels[1, 5:] != -100).any()
+    c = GroundingCollator(_stub_processor(30, 0))
+    exs = [{"audio": str(wav), "messages": [{"role": "user", "content": "q"}], "target": "A"},
+           {"audio": str(wav), "messages": [{"role": "user", "content": "q"}], "target": "A B C"}]
+    out = c(exs)
+    labels, attn = out["labels"], out["attention_mask"]
+    for i, n_ans in enumerate((1, 3)):
+        end = int(attn[i].sum())
+        kept = (labels[i] != -100).nonzero().flatten().tolist()
+        assert kept == list(range(end - n_ans, end)), (i, kept, end)
+    # padded positions are never trained on
+    for i in range(2):
+        pad = attn[i] == 0
+        if pad.any():
+            assert (labels[i][pad] == -100).all()
 
 
 def test_hybrid_selects_on_val_and_reports_on_test(tmp_path):

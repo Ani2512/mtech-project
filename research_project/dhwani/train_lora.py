@@ -23,15 +23,32 @@ import json
 from pathlib import Path
 
 
+def _bf16_ok() -> bool:
+    try:
+        import torch
+
+        return torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    except Exception:
+        return False
+
+
 def load_examples(path: Path) -> list[dict]:
     return [json.loads(l) for l in open(path, encoding="utf-8")]
 
 
 class GroundingCollator:
-    """Builds a batch and masks the prompt so loss is taken on the answer only.
+    """Builds a batch and masks everything except the answer.
 
-    Training on the prompt tokens teaches the model to reproduce our own
-    instruction text, which wastes capacity and is not what is being measured.
+    Masking is done by *answer length from the end*, not by prompt length from
+    the start. The prompt carries one audio placeholder token which the
+    processor expands into hundreds of audio positions, so a prompt-length mask
+    computed from the text covers only the first few dozen tokens and leaves the
+    whole audio region as a training target. That produced NaN gradients and a
+    loss collapsing to zero on the first real run, while a stub processor that
+    did no expansion let the unit test pass.
+
+    Counting the answer tokens back from the last non-padding position is
+    immune to however the processor expands the prompt.
     """
 
     def __init__(self, processor, sr: int = 16000, max_audio_s: float = 30.0):
@@ -43,7 +60,8 @@ class GroundingCollator:
         import librosa
         import torch
 
-        texts, audios, prompt_lens = [], [], []
+        tok = self.p.tokenizer
+        texts, audios, answer_lens = [], [], []
         for ex in batch:
             conv = []
             for m in ex["messages"]:
@@ -54,69 +72,31 @@ class GroundingCollator:
                     content = [{"type": "text", "text": m["content"]}]
                 conv.append({"role": m["role"], "content": content})
             prompt = self.p.apply_chat_template(conv, add_generation_prompt=True, tokenize=False)
-            texts.append(prompt + ex["target"] + self.p.tokenizer.eos_token)
-            prompt_lens.append(len(self.p.tokenizer(prompt, add_special_tokens=False).input_ids))
+            answer = ex["target"] + (tok.eos_token or "")
+            texts.append(prompt + answer)
+            answer_lens.append(len(tok(answer, add_special_tokens=False).input_ids))
             a, _ = librosa.load(ex["audio"], sr=self.sr)
             audios.append(a[: int(self.max_audio_s * self.sr)])
 
         enc = self.p(text=texts, audio=audios, sampling_rate=self.sr,
                      return_tensors="pt", padding=True)
-        labels = enc["input_ids"].clone()
-        labels[labels == self.p.tokenizer.pad_token_id] = -100
-        for i, n in enumerate(prompt_lens):
-            labels[i, :n] = -100          # loss on the answer only
+        input_ids = enc["input_ids"]
+        labels = torch.full_like(input_ids, -100)
+
+        pad_id = tok.pad_token_id
+        attn = enc.get("attention_mask")
+        for i, n_ans in enumerate(answer_lens):
+            if attn is not None:
+                end = int(attn[i].sum())                       # last real token
+            elif pad_id is not None:
+                nonpad = (input_ids[i] != pad_id).nonzero()
+                end = int(nonpad[-1]) + 1 if len(nonpad) else int(input_ids.shape[1])
+            else:
+                end = int(input_ids.shape[1])
+            start = max(0, end - n_ans)
+            labels[i, start:end] = input_ids[i, start:end]
         enc["labels"] = labels
         return enc
-
-
-def build_model(model_id: str, precision: str | None, lora_r: int, lora_alpha: int,
-                lora_dropout: float, time_tokens: bool = False, max_seconds: float = 30.0,
-                resolution: float = 0.1):
-    import torch
-    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-    from transformers import Qwen2_5OmniProcessor, Qwen2_5OmniThinkerForConditionalGeneration
-
-    from .models import _fit_plan
-
-    label, kw = _fit_plan(8.4, precision)
-    print(f"[train] loading thinker in {label}")
-    # Load the thinker alone: the talker is speech synthesis and is dead weight here.
-    model = Qwen2_5OmniThinkerForConditionalGeneration.from_pretrained(model_id, **kw)
-    processor = Qwen2_5OmniProcessor.from_pretrained(model_id)
-
-    vocab = None
-    if time_tokens:
-        from .timetokens import TimeVocab
-
-        vocab = TimeVocab(max_seconds, resolution)
-        added = processor.tokenizer.add_tokens(vocab.tokens, special_tokens=False)
-        model.resize_token_embeddings(len(processor.tokenizer))
-        # TEMPO (arXiv:2608.29999): initialise each new embedding as the mean of
-        # the BPE pieces of the number it stands for, so the tokens start where
-        # the model already represents those digits rather than at random.
-        n = vocab.init_embeddings(processor.tokenizer, model.get_input_embeddings().weight)
-        print(f"[train] added {added} timestamp tokens, initialised {n} embeddings")
-
-    if "4bit" in label or "8bit" in label:
-        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
-    model.config.use_cache = False
-
-    cfg = LoraConfig(
-        r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout, bias="none",
-        task_type="CAUSAL_LM",
-        # Language side only. The audio encoder is frozen: with ~200 training clips
-        # there is not enough signal to retrain perception, and unfreezing it is the
-        # fastest way to overfit the composed-audio distribution.
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                        "gate_proj", "up_proj", "down_proj"],
-        # New timestamp embeddings are not low-rank updates to existing weights;
-        # they are new rows and must be trained in full, or they stay at their
-        # initialisation and the whole scheme is inert.
-        modules_to_save=(["embed_tokens", "lm_head"] if time_tokens else None),
-    )
-    model = get_peft_model(model, cfg)
-    model.print_trainable_parameters()
-    return model, processor, vocab
 
 
 def time_loss_terms(logits, labels, time_ids, Q, ignore_index: int = -100):
@@ -240,7 +220,10 @@ def main(argv=None):
         logging_steps=10,
         save_strategy="epoch",
         eval_strategy="epoch" if val else "no",
-        bf16=False, fp16=True,
+        # bf16 where the card supports it (Ampere and later); fp16 otherwise.
+        # bf16 has the same range as fp32 and removes the overflow that makes
+        # QLoRA produce nan gradients.
+        bf16=_bf16_ok(), fp16=not _bf16_ok(),
         gradient_checkpointing=True,
         report_to=[],
         remove_unused_columns=False,
@@ -253,7 +236,18 @@ def main(argv=None):
     else:
         trainer = Trainer(model=model, args=args, train_dataset=train, eval_dataset=val,
                           data_collator=collate)
-    trainer.train()
+    result = trainer.train()
+
+    # A nan grad_norm silently skips every optimiser step: the run "succeeds",
+    # the adapter saves, and nothing has been learned. Say so rather than let it
+    # pass as a completed job.
+    loss = float(result.training_loss) if result.training_loss is not None else float("nan")
+    if not (loss == loss) or loss == 0.0:
+        print(f"\n*** WARNING: training_loss = {loss}. The model did not train. "
+              f"Check for nan grad_norm in the log above; do not trust this adapter. ***\n")
+    else:
+        print(f"[train] final training loss {loss:.4f}")
+
     model.save_pretrained(a.out)
     processor.save_pretrained(a.out)
     print(f"[train] adapter saved to {a.out}")
