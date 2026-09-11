@@ -21,11 +21,17 @@ def main(argv=None):
     ap.add_argument("--out", required=True)
     ap.add_argument("--n", type=int, default=None)
     ap.add_argument("--types", default=None, help="comma-separated subset of condition types")
+    ap.add_argument("--precision", default=None, choices=["fp16", "8bit", "4bit"],
+                    help="override the automatic fit (default: pick from GPU memory)")
+    ap.add_argument("--max-new-tokens", type=int, default=96,
+                    help="an interval list is short; 96 is ample and keeps decoding fast")
     a = ap.parse_args(argv)
 
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    backend = get_backend(a.model)
+    kw = {} if a.model.startswith("mock:") or a.model == "gemini" else {
+        "precision": a.precision, "max_new_tokens": a.max_new_tokens}
+    backend = get_backend(a.model, **kw)
     types = set(a.types.split(",")) if a.types else None
     rows, t0 = [], time.time()
     with open(a.bench, encoding="utf-8") as f, open(out / "predictions.jsonl", "w", encoding="utf-8") as fo:
@@ -43,8 +49,9 @@ def main(argv=None):
             row = {"qid": q.qid, "qtype": q.qtype, "text": q.text, "answer": q.answer, "raw": raw, "pred": pred, **s}
             rows.append(row)
             fo.write(json.dumps(row, ensure_ascii=False) + "\n")
-            if (k + 1) % 50 == 0:
-                print(f"{k + 1} queries, {time.time() - t0:.0f}s")
+            if (k + 1) % 10 == 0:
+                el = time.time() - t0
+                print(f"{k + 1} queries | {el:.0f}s | {el / (k + 1):.1f}s per query", flush=True)
     summary = {"model": backend.name, "bench": a.bench, "by_type": summarize(rows)}
     (out / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     _print_table(summary["by_type"])

@@ -46,16 +46,61 @@ class MockBackend:
         return json.dumps([[round(a, 2), round(b, 2)] for a, b in iv])
 
 
+def choose_precision(total_gib: float | None, param_billions: float = 8.4) -> str:
+    """fp16 when the weights plus working headroom genuinely fit, else 4-bit.
+
+    Qwen2-Audio-7B-Instruct and Qwen2.5-Omni-7B are ~8.4B parameters, so fp16
+    weights alone are ~17 GB. A Colab T4 has ~15 GB: fp16 there silently spills
+    to CPU through device_map and inference becomes unusably slow. We skip 8-bit
+    in the automatic path because bitsandbytes LLM.int8() is slower than NF4
+    4-bit on Turing and Ampere while using twice the memory; 8bit stays available
+    as an explicit override.
+    """
+    if total_gib is None:
+        return "cpu"
+    return "fp16" if total_gib >= param_billions * 2 * 1.25 else "4bit"
+
+
+def _fit_plan(param_billions: float = 8.4, override: str | None = None) -> tuple[str, dict]:
+    """Returns (label, kwargs for from_pretrained)."""
+    import torch
+
+    if override in ("fp16", "8bit", "4bit"):
+        choice = override
+    else:
+        total = (torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
+                 if torch.cuda.is_available() else None)
+        choice = choose_precision(total, param_billions)
+
+    if choice == "cpu":
+        return "cpu (no GPU visible - this will be very slow)", {"dtype": torch.float32}
+    if choice == "fp16":
+        return "fp16", {"dtype": torch.float16, "device_map": "auto"}
+
+    from transformers import BitsAndBytesConfig
+
+    if choice == "8bit":
+        cfg = BitsAndBytesConfig(load_in_8bit=True)
+    else:
+        cfg = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                                 bnb_4bit_compute_dtype=torch.float16,
+                                 bnb_4bit_use_double_quant=True)
+    return choice, {"quantization_config": cfg, "device_map": "auto"}
+
+
 class Qwen25OmniBackend:
     name = "qwen2.5-omni"
 
-    def __init__(self, model_id="Qwen/Qwen2.5-Omni-7B", device="auto"):
+    def __init__(self, model_id="Qwen/Qwen2.5-Omni-7B", precision=None, max_new_tokens=96):
         import torch
         from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
 
         self.torch = torch
+        self.max_new_tokens = max_new_tokens
+        label, kw = _fit_plan(8.4, precision)
+        print(f"[qwen2.5-omni] loading in {label}")
         self.model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
-            model_id, dtype=torch.bfloat16, device_map=device, enable_audio_output=False
+            model_id, enable_audio_output=False, **kw
         ).eval()
         self.processor = Qwen2_5OmniProcessor.from_pretrained(model_id)
 
@@ -70,7 +115,7 @@ class Qwen25OmniBackend:
         audios, images, videos = process_mm_info(conv, use_audio_in_video=False)
         inputs = self.processor(text=text, audio=audios, images=images, videos=videos, return_tensors="pt", padding=True).to(self.model.device)
         with self.torch.no_grad():
-            ids = self.model.generate(**inputs, return_audio=False, max_new_tokens=200, do_sample=False)
+            ids = self.model.generate(**inputs, return_audio=False, max_new_tokens=self.max_new_tokens, do_sample=False)
         ids = ids[:, inputs["input_ids"].shape[1]:]
         return self.processor.batch_decode(ids, skip_special_tokens=True)[0].strip()
 
@@ -78,13 +123,16 @@ class Qwen25OmniBackend:
 class Qwen2AudioBackend:
     name = "qwen2-audio"
 
-    def __init__(self, model_id="Qwen/Qwen2-Audio-7B-Instruct", device="auto"):
+    def __init__(self, model_id="Qwen/Qwen2-Audio-7B-Instruct", precision=None, max_new_tokens=96):
         import torch
         from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration
 
         self.torch = torch
+        self.max_new_tokens = max_new_tokens
         self.processor = AutoProcessor.from_pretrained(model_id)
-        self.model = Qwen2AudioForConditionalGeneration.from_pretrained(model_id, dtype=torch.float16, device_map=device).eval()
+        label, kw = _fit_plan(8.4, precision)
+        print(f"[qwen2-audio] loading in {label}")
+        self.model = Qwen2AudioForConditionalGeneration.from_pretrained(model_id, **kw).eval()
         self.sr = self.processor.feature_extractor.sampling_rate
 
     def ground(self, audio_path, query_text, query=None, duration=None):
@@ -98,7 +146,7 @@ class Qwen2AudioBackend:
         text = self.processor.apply_chat_template(conv, add_generation_prompt=True, tokenize=False)
         inputs = self.processor(text=text, audio=[audio], sampling_rate=self.sr, return_tensors="pt", padding=True).to(self.model.device)
         with self.torch.no_grad():
-            ids = self.model.generate(**inputs, max_new_tokens=200, do_sample=False)
+            ids = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens, do_sample=False)
         ids = ids[:, inputs.input_ids.size(1):]
         return self.processor.batch_decode(ids, skip_special_tokens=True)[0].strip()
 
@@ -123,7 +171,9 @@ class GeminiBackend:
         return (r.text or "").strip()
 
 
-def get_backend(name: str):
+def get_backend(name: str, **kw):
     if name.startswith("mock:"):
         return MockBackend(name.split(":", 1)[1])
-    return {"qwen2.5-omni": Qwen25OmniBackend, "qwen2-audio": Qwen2AudioBackend, "gemini": GeminiBackend}[name]()
+    if name == "gemini":
+        return GeminiBackend()
+    return {"qwen2.5-omni": Qwen25OmniBackend, "qwen2-audio": Qwen2AudioBackend}[name](**kw)
