@@ -7,6 +7,7 @@ rejection      queries whose ground truth is empty: did the model return []?
 """
 from __future__ import annotations
 
+import ast
 import json
 import re
 from collections import defaultdict
@@ -19,29 +20,93 @@ _PAIR = re.compile(r"\[?\s*(\d+(?:\.\d+)?)\s*(?:,|-|–|to)\s*(\d+(?:\.\d+)?)\s*
 _EMPTY = re.compile(r"\[\s*\]|\bnone\b|\bno such\b|does not occur|not present|no occurrence", re.I)
 
 
+def _pairs_from_obj(obj) -> list[Interval] | None:
+    """Pull (start, end) pairs out of a decoded list.
+
+    Models do not stick to [[s, e], ...]. Observed from Qwen2-Audio:
+        [{'sneeze_start': '0.63', 'sneeze_end': '1.09'}, ...]
+        [{'start': '16.39', 'end': '16.94'}, ...]
+        [{'sneeze': '1.96-2.34'}, ...]
+    Returning None for these would score the parser, not the model.
+    """
+    if not isinstance(obj, list):
+        return None
+    if not obj:
+        return []
+    pairs: list[Interval] = []
+    for it in obj:
+        if isinstance(it, (list, tuple)) and len(it) == 2 and all(_isnum(v) for v in it):
+            pairs.append((float(it[0]), float(it[1])))
+        elif isinstance(it, dict):
+            got = _pair_from_dict(it)
+            if got:
+                pairs.append(got)
+    # a flat [s, e] pair, e.g. "[19.43, 20.00]"
+    if not pairs and len(obj) == 2 and all(_isnum(v) for v in obj):
+        pairs.append((float(obj[0]), float(obj[1])))
+    return _clean(pairs) if pairs else None
+
+
+def _isnum(v) -> bool:
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, (int, float)):
+        return True
+    if isinstance(v, str):
+        try:
+            float(v.strip()); return True
+        except ValueError:
+            return False
+    return False
+
+
+def _pair_from_dict(d: dict) -> Interval | None:
+    # keys ending in start/end, with any prefix: 'start', 'sneeze_start', 'onset'
+    start = end = None
+    for k, v in d.items():
+        kl = str(k).lower()
+        if not _isnum(v):
+            continue
+        if kl.endswith("start") or kl in ("onset", "from", "begin", "s"):
+            start = float(str(v).strip())
+        elif kl.endswith("end") or kl in ("offset", "to", "stop", "e"):
+            end = float(str(v).strip())
+    if start is not None and end is not None:
+        return (start, end)
+    # a single value holding a range: {'sneeze': '1.96-2.34'} or {'x': [1.9, 2.3]}
+    for v in d.values():
+        if isinstance(v, (list, tuple)) and len(v) == 2 and all(_isnum(x) for x in v):
+            return (float(v[0]), float(v[1]))
+        if isinstance(v, str):
+            m = _PAIR.search(v)
+            if m:
+                return (float(m.group(1)), float(m.group(2)))
+    # exactly two numeric values and nothing else to go on
+    nums = [float(str(v).strip()) for v in d.values() if _isnum(v)]
+    if len(nums) == 2:
+        return (nums[0], nums[1])
+    return None
+
+
 def parse_intervals(text: str) -> list[Interval] | None:
     """Return a list of (start, end); [] for an explicit empty answer; None if unparseable."""
     if text is None:
         return None
     text = text.strip()
-    # 1) JSON anywhere in the text
+    # 1) a bracketed literal anywhere in the text, as JSON then as a Python literal
+    #    (models frequently emit single-quoted dicts, which json.loads rejects)
     for m in re.finditer(r"\[[^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*\]", text):
-        try:
-            obj = json.loads(m.group(0))
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, list):
-            if not obj:
-                return []
-            pairs = []
-            for it in obj:
-                if isinstance(it, (list, tuple)) and len(it) == 2:
-                    pairs.append((float(it[0]), float(it[1])))
-                elif isinstance(it, dict) and {"start", "end"} <= set(it):
-                    pairs.append((float(it["start"]), float(it["end"])))
-            if pairs:
-                return _clean(pairs)
-    # 2) explicit empty
+        blob = m.group(0)
+        for loader in (json.loads, ast.literal_eval):
+            try:
+                obj = loader(blob)
+            except (json.JSONDecodeError, ValueError, SyntaxError):
+                continue
+            got = _pairs_from_obj(obj)
+            if got is not None:
+                return got
+            break
+    # 2) an explicit empty answer
     if _EMPTY.search(text):
         return []
     # 3) loose "12.3-15.6" / "12.3 to 15.6" pairs

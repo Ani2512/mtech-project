@@ -118,3 +118,48 @@ def test_rejection_metrics_present_when_type_has_rejection_queries():
             {"qtype": "ABSENT", **score_query([(1, 2)], [], True)}]
     s = summarize(rows)["ABSENT"]
     assert s["rejection_recall"] == 0.5 and s["rejection_f1"] is not None
+
+
+def test_parse_real_model_output_shapes():
+    """Shapes actually emitted by Qwen2-Audio on this benchmark. Returning None
+    for these would score the parser rather than the model."""
+    # python-style single-quoted dicts with prefixed keys
+    assert parse_intervals("[{'sneeze_start': '0.63', 'sneeze_end': '1.09'}, "
+                           "{'sneeze_start': '4.21', 'sneeze_end': '4.62'}]") == [(0.63, 1.09), (4.21, 4.62)]
+    # single-quoted plain start/end
+    assert parse_intervals("[{'start': '16.39', 'end': '16.94'}]") == [(16.39, 16.94)]
+    # a dict whose single value holds a range string
+    assert parse_intervals("[{'sneeze': '1.96-2.34'}, {'glass_breaking': '18.87-20.00'}]") == \
+        [(1.96, 2.34), (18.87, 20.0)]
+    # a flat pair rather than a list of pairs
+    assert parse_intervals("[19.43, 20.00]") == [(19.43, 20.0)]
+    # onset/offset naming
+    assert parse_intervals('[{"onset": 1.0, "offset": 2.0}]') == [(1.0, 2.0)]
+    # still refuses genuine non-answers
+    assert parse_intervals("I am unable to analyse this audio.") is None
+    # and still reads explicit emptiness
+    assert parse_intervals("[]") == []
+
+
+def test_rescore_recovers_parse_failures(tmp_path):
+    """A parser improvement must be applicable to a finished run without
+    re-running the model."""
+    import json as _json
+    from dhwani.rescore import rescore
+
+    run = tmp_path / "run"
+    run.mkdir()
+    raws = ["[[1.0, 2.0]]", "[{'x_start': '1.0', 'x_end': '2.0'}]", "no idea"]
+    with open(run / "predictions.jsonl", "w") as f:
+        for i, raw in enumerate(raws):
+            f.write(_json.dumps({
+                "qid": f"q{i}", "qtype": "PLAIN", "text": "t", "answer": [[1.0, 2.0]],
+                "raw": raw, "pred": None, "expects_empty": False}) + "\n")
+    (run / "summary.json").write_text(_json.dumps(
+        {"model": "m", "bench": "b", "by_type": summarize(
+            [{"qtype": "PLAIN", **score_query(None, [(1.0, 2.0)], False)} for _ in raws])}))
+
+    s = rescore(run, in_place=False)
+    assert s["parse_recovered"] == 2                     # two of three now parse
+    assert abs(s["by_type"]["ALL"]["parse_fail_rate"] - 1 / 3) < 1e-9
+    assert abs(s["by_type"]["ALL"]["f1@0.5"] - 2 / 3) < 1e-9
