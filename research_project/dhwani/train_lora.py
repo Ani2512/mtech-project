@@ -99,6 +99,70 @@ class GroundingCollator:
         return enc
 
 
+def build_model(model_id: str, precision: str | None, lora_r: int, lora_alpha: int,
+                lora_dropout: float, time_tokens: bool = False, max_seconds: float = 30.0,
+                resolution: float = 0.1):
+    import torch
+    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+    from transformers import Qwen2_5OmniProcessor, Qwen2_5OmniThinkerForConditionalGeneration
+
+    from .models import _fit_plan
+
+    label, kw = _fit_plan(8.4, precision)
+    print(f"[train] loading thinker in {label}")
+    # Load the thinker alone: the talker is speech synthesis and is dead weight here.
+    model = Qwen2_5OmniThinkerForConditionalGeneration.from_pretrained(model_id, **kw)
+    processor = Qwen2_5OmniProcessor.from_pretrained(model_id)
+
+    vocab = None
+    if time_tokens:
+        from .timetokens import TimeVocab
+
+        vocab = TimeVocab(max_seconds, resolution)
+        added = processor.tokenizer.add_tokens(vocab.tokens, special_tokens=False)
+        model.resize_token_embeddings(len(processor.tokenizer))
+        # TEMPO (arXiv:2608.29999): initialise each new embedding as the mean of
+        # the BPE pieces of the number it stands for, so the tokens start where
+        # the model already represents those digits rather than at random.
+        n = vocab.init_embeddings(processor.tokenizer, model.get_input_embeddings().weight)
+        print(f"[train] added {added} timestamp tokens, initialised {n} embeddings")
+
+    if "4bit" in label or "8bit" in label:
+        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
+    model.config.use_cache = False
+
+    cfg = LoraConfig(
+        r=lora_r, lora_alpha=lora_alpha, lora_dropout=lora_dropout, bias="none",
+        task_type="CAUSAL_LM",
+        # Language side only. The audio encoder is frozen: with ~200 training clips
+        # there is not enough signal to retrain perception, and unfreezing it is the
+        # fastest way to overfit the composed-audio distribution.
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                        "gate_proj", "up_proj", "down_proj"],
+        # New timestamp embeddings are not low-rank updates to existing weights;
+        # they are new rows and must be trained in full, or they stay at their
+        # initialisation and the whole scheme is inert.
+        modules_to_save=(["embed_tokens", "lm_head"] if time_tokens else None),
+    )
+    model = get_peft_model(model, cfg)
+
+    # Keep every trainable tensor in fp32. With 4-bit weights and an fp16
+    # compute dtype the adapter updates underflow and the optimiser state
+    # overflows, which shows up as grad_norm = nan and a loss collapsing to
+    # zero rather than as an exception. T4 and P100 are Turing and Pascal, so
+    # bf16 is not available as an escape.
+    n_cast = 0
+    for _, param in model.named_parameters():
+        if param.requires_grad and param.dtype in (torch.float16, torch.bfloat16):
+            param.data = param.data.to(torch.float32)
+            n_cast += 1
+    if n_cast:
+        print(f"[train] cast {n_cast} trainable tensors to fp32 for stability")
+
+    model.print_trainable_parameters()
+    return model, processor, vocab
+
+
 def time_loss_terms(logits, labels, time_ids, Q, ignore_index: int = -100):
     """TEMPO's distance-aware auxiliary loss, restricted to timestamp positions.
 

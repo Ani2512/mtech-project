@@ -714,3 +714,58 @@ def test_f_beta_is_reported_in_summaries():
     assert s["f_beta"] is not None
     # a miss scores lower under F-beta than under f1
     assert s["f_beta"] < s["f1@0.5"]
+
+
+def test_every_called_name_in_the_package_resolves():
+    """Catch a function that is called but no longer defined.
+
+    A patch that spliced out a block of dhwani/train_lora.py removed build_model
+    while leaving main()'s call to it. The module still imported, every existing
+    test still passed, and the failure only appeared on a GPU after the model had
+    loaded. This is a cheap static check for that whole class of mistake.
+    """
+    import ast
+    import builtins
+    import pathlib
+
+    pkg = pathlib.Path(__file__).resolve().parent.parent / "dhwani"
+    problems = []
+    for path in sorted(pkg.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+
+        defined = set(dir(builtins))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                defined.add(node.name)
+            elif isinstance(node, ast.Import):
+                defined.update((a.asname or a.name.split(".")[0]) for a in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                defined.update((a.asname or a.name) for a in node.names)
+            elif isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        defined.add(t.id)
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+                if isinstance(node.target, ast.Name):
+                    defined.add(node.target.id)
+            elif isinstance(node, (ast.For, ast.comprehension)):
+                tgt = getattr(node, "target", None)
+                if isinstance(tgt, ast.Name):
+                    defined.add(tgt.id)
+                elif isinstance(tgt, ast.Tuple):
+                    defined.update(e.id for e in tgt.elts if isinstance(e, ast.Name))
+            elif isinstance(node, ast.withitem) and isinstance(node.optional_vars, ast.Name):
+                defined.add(node.optional_vars.id)
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                defined.add(node.name)
+            elif isinstance(node, ast.arg):
+                defined.add(node.arg)
+            elif isinstance(node, ast.Lambda):
+                defined.update(a.arg for a in node.args.args)
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id not in defined:
+                    problems.append(f"{path.name}:{node.lineno} calls undefined {node.func.id}()")
+
+    assert not problems, "undefined calls:\n  " + "\n  ".join(problems)
