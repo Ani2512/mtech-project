@@ -163,3 +163,26 @@ def test_rescore_recovers_parse_failures(tmp_path):
     assert s["parse_recovered"] == 2                     # two of three now parse
     assert abs(s["by_type"]["ALL"]["parse_fail_rate"] - 1 / 3) < 1e-9
     assert abs(s["by_type"]["ALL"]["f1@0.5"] - 2 / 3) < 1e-9
+
+
+def test_localisation_separates_place_from_duration():
+    """A perfectly centred but too-short interval and a displaced one both score
+    0 at IoU>=0.5; centre error and duration ratio tell them apart."""
+    from dhwani.metrics import localisation
+
+    gold = [(10.0, 12.0)]
+    short_but_centred = [(10.9, 11.1)]
+    displaced_right_size = [(2.0, 4.0)]
+
+    assert matched_f1(short_but_centred, gold, 0.5)[2] == 0.0
+    assert matched_f1(displaced_right_size, gold, 0.5)[2] == 0.0
+
+    d1, r1 = localisation(short_but_centred, gold)
+    d2, r2 = localisation(displaced_right_size, gold)
+    assert d1[0] < 0.1 and abs(r1 - 0.1) < 1e-9   # right place, a tenth the length
+    assert d2[0] == 8.0 and r2 == 1.0         # right length, far away
+
+    s = score_query(short_but_centred, gold, False)
+    assert abs(s["duration_ratio"] - 0.1) < 1e-9 and s["centre_errors"][0] < 0.1
+    agg = summarize([{"qtype": "PLAIN", **s}])["PLAIN"]
+    assert abs(agg["duration_ratio_median"] - 0.1) < 1e-9 and agg["centre_within_1s"] == 1.0

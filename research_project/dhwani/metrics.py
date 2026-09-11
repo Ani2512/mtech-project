@@ -176,12 +176,40 @@ def matched_f1(pred: list[Interval], gt: list[Interval], thr: float = 0.5) -> tu
     return prec, rec, f1
 
 
+def _centre(iv: Interval) -> float:
+    return (iv[0] + iv[1]) / 2
+
+
+def localisation(pred: list[Interval], gt: list[Interval]) -> tuple[list[float], float | None]:
+    """Separate *where* from *how long*.
+
+    IoU-based F1 conflates two failures. A model that centres an interval
+    perfectly but makes it a fifth as long scores 0 at IoU>=0.5, and so does a
+    model pointing somewhere else entirely. Qwen2-Audio does both at once
+    (median predicted duration 0.53 s against a 2.50 s gold), so the headline
+    number alone cannot say which is happening.
+
+    Returns (distance from each predicted centre to the nearest gold centre,
+    ratio of median predicted duration to median gold duration).
+    """
+    if not pred or not gt:
+        return [], None
+    gc = [_centre(g) for g in gt]
+    dists = [min(abs(_centre(p) - c) for c in gc) for p in pred]
+    pdur = sorted(b - a for a, b in pred)[len(pred) // 2]
+    gdur = sorted(b - a for a, b in gt)[len(gt) // 2]
+    return dists, (pdur / gdur if gdur > 0 else None)
+
+
 def score_query(pred: list[Interval] | None, gt: list[Interval], expects_empty: bool) -> dict:
     parse_fail = pred is None
     p = pred or []
     p5 = matched_f1(p, gt, 0.5)
     p7 = matched_f1(p, gt, 0.7)
+    dists, dur_ratio = localisation(p, gt)
     return {
+        "centre_errors": dists,
+        "duration_ratio": dur_ratio,
         "parse_fail": parse_fail,
         "union_iou": 0.0 if parse_fail else union_iou(p, gt),
         "f1@0.5": 0.0 if parse_fail else p5[2],
@@ -229,5 +257,17 @@ def summarize(rows: list[dict], key: str = "qtype") -> dict:
             "rejection_f1": (2 * rej_p * rej_r / (rej_p + rej_r)
                              if has_rej and (rej_p + rej_r) else (None if not has_rej else 0.0)),
             "false_rejection_rate": (sum(r["pred_empty"] for r in nonemp) / len(nonemp)) if nonemp else None,
+            "centre_error_median": _median([d for r in rs for d in r.get("centre_errors", [])]),
+            "centre_within_1s": _frac([d for r in rs for d in r.get("centre_errors", [])], 1.0),
+            "duration_ratio_median": _median([r["duration_ratio"] for r in rs
+                                              if r.get("duration_ratio") is not None]),
         }
     return out
+
+
+def _median(xs: list[float]) -> float | None:
+    return sorted(xs)[len(xs) // 2] if xs else None
+
+
+def _frac(xs: list[float], thr: float) -> float | None:
+    return (sum(x < thr for x in xs) / len(xs)) if xs else None
