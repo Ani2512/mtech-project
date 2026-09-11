@@ -186,3 +186,60 @@ def test_localisation_separates_place_from_duration():
     assert abs(s["duration_ratio"] - 0.1) < 1e-9 and s["centre_errors"][0] < 0.1
     agg = summarize([{"qtype": "PLAIN", **s}])["PLAIN"]
     assert abs(agg["duration_ratio_median"] - 0.1) < 1e-9 and agg["centre_within_1s"] == 1.0
+
+
+def test_agent_combine_matches_timeline_predicates():
+    """The agent must apply exactly the semantics that define the ground truth,
+    otherwise it is solving a different task."""
+    from dhwani.agent import combine
+
+    xs = [e.interval for e in TL.occ("dog")]
+    horn = [e.interval for e in TL.occ("horn")]
+    music = [e.interval for e in TL.occ("music")]
+    steps = [e.interval for e in TL.occ("steps")]
+
+    assert combine("PLAIN", xs, []) == [e.interval for e in TL.plain("dog")]
+    assert combine("ORDINAL", xs, [], k=2) == [e.interval for e in TL.ordinal("dog", 2)]
+    assert combine("ORDINAL", xs, [], k="last") == [e.interval for e in TL.ordinal("dog", "last")]
+    assert combine("ORDINAL", xs, [], k=9) == []
+    assert combine("AFTER", xs, horn) == [e.interval for e in TL.after("dog", "horn")]
+    assert combine("BEFORE", xs, horn) == [e.interval for e in TL.before("dog", "horn")]
+    assert combine("NEXT_AFTER", xs, horn) == [e.interval for e in TL.next_after("dog", "horn")]
+    assert combine("WHILE", xs, music) == [e.interval for e in TL.while_("dog", "music")]
+    assert combine("NOT_FOLLOWED", xs, steps, window=3.0) == \
+        [e.interval for e in TL.not_followed("dog", "steps", 3.0)]
+
+
+def test_agent_with_oracle_grounder_is_perfect(tmp_path):
+    """With perfect grounding the agent must score 1.000, or its composition
+    disagrees with the ground truth somewhere."""
+    import json as _json
+    from dhwani.build_benchmark import build
+    from dhwani.run_agent import main as run_agent
+
+    build("procedural", 15, tmp_path / "b", seed=5)
+    run_agent(["--grounder", "oracle",
+               "--bench", str(tmp_path / "b" / "benchmark.jsonl"),
+               "--timelines", str(tmp_path / "b" / "timelines.jsonl"),
+               "--out", str(tmp_path / "agent")])
+    s = _json.loads((tmp_path / "agent" / "summary.json").read_text())["by_type"]
+    assert s["ALL"]["f1@0.5"] == 1.0, s["ALL"]
+    assert s["ALL"]["count_acc"] == 1.0
+    assert s["ALL"]["parse_fail_rate"] == 0.0
+
+
+def test_oracle_grounder_matches_multiword_labels():
+    """Queries carry 'glass_breaking' while timelines and prompts may use
+    'glass breaking'. Normalising only one side makes the oracle silently
+    return nothing for every multi-word sound."""
+    from dhwani.agent import oracle_grounder
+
+    g = oracle_grounder({"c1": {"events": [
+        {"label": "glass_breaking", "onset": 1.0, "offset": 2.0},
+        {"label": "dog", "onset": 5.0, "offset": 6.0}]}})
+    assert g("/x/c1.wav", "glass_breaking") == [(1.0, 2.0)]
+    assert g("/x/c1.wav", "glass breaking") == [(1.0, 2.0)]
+    assert g("/x/c1.wav", "dog") == [(5.0, 6.0)]
+    assert g("/x/c1.wav", "cat") == []
+    # must not match a different sound by substring
+    assert g("/x/c1.wav", "glass") == []
