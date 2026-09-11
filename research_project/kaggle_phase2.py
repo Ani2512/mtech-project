@@ -1,5 +1,16 @@
 """Run all of phase 2 unattended, then print the comparison table.
 
+Ordered so the essential comparison finishes first. Measured on a T4 at
+4.53 s/example with --amp none:
+
+    arm C train   2.9 h      arm A (direct)      0.8 h
+    arm C eval    0.8 h      arm B (agent)       0.2 h  (grounding cached per clip+sound)
+    arm E train   2.9 h      union k=3           2.3 h
+    arm E eval    0.8 h      hybrid              instant
+
+That totals about 10.7 h, inside a 12 h session. Every step is skipped when its
+output exists, so a timeout is resumed by re-running this file.
+
     %run /kaggle/working/bootstrap.py      # once, to set up and smoke test
     %run /kaggle/working/phase2.py         # this
 
@@ -41,7 +52,7 @@ def run(label, cmd, produces):
 
 ok = True
 
-# --- arm C: QLoRA, plain-text timestamps ------------------------------------
+# --- arm C first: it is the main comparison ---------------------------------
 ok &= run("train arm C (text timestamps)",
           ["dhwani.train_lora", "--data", "data/esc50/sft_train.jsonl",
            "--val", "data/esc50/sft_val.jsonl", "--out", "/kaggle/temp/lora_text",
@@ -52,7 +63,21 @@ ok &= run("eval arm C",
            "--bench", TEST, "--out", "runs/esc50/test_lora_text"],
           "runs/esc50/test_lora_text/summary.json")
 
-# --- arm E: QLoRA, atomic timestamp tokens ----------------------------------
+# --- cheap untrained baselines, so arm C has something to be compared against
+ok &= run("arm A (direct prompting)",
+          ["dhwani.run_zeroshot", "--model", "qwen2.5-omni", "--bench", TEST,
+           "--out", "runs/esc50/test_direct"],
+          "runs/esc50/test_direct/summary.json")
+ok &= run("arm B (decompose and combine)",
+          ["dhwani.run_agent", "--grounder", "qwen2.5-omni", "--bench", TEST,
+           "--out", "runs/esc50/test_agent"],
+          "runs/esc50/test_agent/summary.json")
+run("arm D (hybrid, selection on val)",
+    ["dhwani.hybrid", "--direct", "runs/esc50/test_direct",
+     "--agent", "runs/esc50/test_agent", "--out", "runs/esc50/test_hybrid"],
+    "runs/esc50/test_hybrid/summary.json")
+
+# --- arm E: a reproduction of published work, so it yields if time runs short
 ok &= run("train arm E (timestamp tokens)",
           ["dhwani.train_lora", "--data", "data/esc50/sft_train_tt.jsonl",
            "--val", "data/esc50/sft_val_tt.jsonl", "--out", "/kaggle/temp/lora_tt",
@@ -64,26 +89,15 @@ ok &= run("eval arm E",
            "--bench", TEST, "--out", "runs/esc50/test_lora_tt"],
           "runs/esc50/test_lora_tt/summary.json")
 
-# --- untrained baselines on the same test split -----------------------------
-ok &= run("arm A (direct prompting)",
+# --- recall-biased decoding last: k forward passes per query is the priciest item.
+# k=3 rather than 5 keeps the run inside one session; simulations put the optimum
+# at k=5/2 votes but k=3 captures most of the gain (docs/recall_bias.md).
+K = os.environ.get("DHWANI_UNION_K", "3")
+ok &= run(f"recall-biased decoding (k={K}, 2 votes)",
           ["dhwani.run_zeroshot", "--model", "qwen2.5-omni", "--bench", TEST,
-           "--out", "runs/esc50/test_direct"],
-          "runs/esc50/test_direct/summary.json")
-ok &= run("arm B (decompose and combine)",
-          ["dhwani.run_agent", "--grounder", "qwen2.5-omni", "--bench", TEST,
-           "--out", "runs/esc50/test_agent"],
-          "runs/esc50/test_agent/summary.json")
-ok &= run("recall-biased decoding (k=5, 2 votes)",
-          ["dhwani.run_zeroshot", "--model", "qwen2.5-omni", "--bench", TEST,
-           "--out", "runs/esc50/test_union", "--samples", "5", "--min-votes", "2",
+           "--out", "runs/esc50/test_union", "--samples", K, "--min-votes", "2",
            "--temperature", "0.7"],
           "runs/esc50/test_union/summary.json")
-
-# --- arm D: per-type selection, chosen on val, reported on test --------------
-run("arm D (hybrid)",
-    ["dhwani.hybrid", "--direct", "runs/esc50/test_direct",
-     "--agent", "runs/esc50/test_agent", "--out", "runs/esc50/test_hybrid"],
-    "runs/esc50/test_hybrid/summary.json")
 
 # --- results ----------------------------------------------------------------
 import glob
