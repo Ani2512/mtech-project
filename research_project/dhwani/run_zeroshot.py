@@ -25,12 +25,16 @@ def main(argv=None):
                     help="override the automatic fit (default: pick from GPU memory)")
     ap.add_argument("--max-new-tokens", type=int, default=96,
                     help="an interval list is short; 96 is ample and keeps decoding fast")
+    ap.add_argument("--adapter", default=None, help="path to a LoRA adapter from dhwani.train_lora")
     a = ap.parse_args(argv)
 
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     kw = {} if a.model.startswith("mock:") or a.model == "gemini" else {
         "precision": a.precision, "max_new_tokens": a.max_new_tokens}
+    if a.adapter:
+        assert a.model == "qwen2.5-omni", "--adapter is only wired for qwen2.5-omni"
+        kw["adapter"] = a.adapter
     backend = get_backend(a.model, **kw)
     types = set(a.types.split(",")) if a.types else None
     rows, t0 = [], time.time()

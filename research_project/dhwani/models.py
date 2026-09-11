@@ -91,17 +91,24 @@ def _fit_plan(param_billions: float = 8.4, override: str | None = None) -> tuple
 class Qwen25OmniBackend:
     name = "qwen2.5-omni"
 
-    def __init__(self, model_id="Qwen/Qwen2.5-Omni-7B", precision=None, max_new_tokens=96):
+    def __init__(self, model_id="Qwen/Qwen2.5-Omni-7B", precision=None, max_new_tokens=96,
+                 adapter=None):
         import torch
         from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
 
         self.torch = torch
         self.max_new_tokens = max_new_tokens
         label, kw = _fit_plan(8.4, precision)
-        print(f"[qwen2.5-omni] loading in {label}")
+        print(f"[qwen2.5-omni] loading in {label}" + (f" + adapter {adapter}" if adapter else ""))
         self.model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
             model_id, enable_audio_output=False, **kw
         ).eval()
+        if adapter:
+            from peft import PeftModel
+            # train_lora tunes the thinker, so the adapter attaches there, not to
+            # the top-level wrapper whose module names it would not match.
+            self.model.thinker = PeftModel.from_pretrained(self.model.thinker, adapter).eval()
+            self.name = f"qwen2.5-omni+lora"
         self.processor = Qwen2_5OmniProcessor.from_pretrained(model_id)
 
     def ground(self, audio_path, query_text, query=None, duration=None):

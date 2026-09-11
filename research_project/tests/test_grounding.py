@@ -243,3 +243,204 @@ def test_oracle_grounder_matches_multiword_labels():
     assert g("/x/c1.wav", "cat") == []
     # must not match a different sound by substring
     assert g("/x/c1.wav", "glass") == []
+
+
+def test_split_is_clip_level_and_stable():
+    """Splitting by query would leak: queries from one clip share audio and
+    timeline. And adding clips later must not reshuffle existing assignments."""
+    from dhwani.split import assign
+
+    a = {c: assign(c, 0, 0.7, 0.15) for c in [f"clip_{i:04d}" for i in range(400)]}
+    assert set(a.values()) == {"train", "val", "test"}
+    counts = {s: sum(v == s for v in a.values()) / len(a) for s in ("train", "val", "test")}
+    assert 0.62 < counts["train"] < 0.78, counts
+    assert 0.09 < counts["val"] < 0.21, counts
+    # stable: same clip, same seed, same answer, regardless of what else exists
+    assert assign("clip_0007", 0, 0.7, 0.15) == a["clip_0007"]
+    # a different seed gives a different partition
+    b = {c: assign(c, 1, 0.7, 0.15) for c in a}
+    assert a != b
+
+
+def test_split_benchmark_has_no_clip_overlap(tmp_path):
+    import json as _json
+    from dhwani.build_benchmark import build
+    from dhwani.split import split_benchmark
+
+    build("procedural", 40, tmp_path / "b", seed=2)
+    stats = split_benchmark(tmp_path / "b" / "benchmark.jsonl", tmp_path / "b", seed=0)
+    assert sum(d["clips"] for d in stats.values()) == 40
+    seen = {}
+    for s in ("train", "val", "test"):
+        for line in open(tmp_path / "b" / f"benchmark_{s}.jsonl"):
+            cid = _json.loads(line)["clip_id"]
+            assert seen.setdefault(cid, s) == s, f"{cid} appears in two splits"
+
+
+def test_sft_mix_hits_the_requested_plain_share(tmp_path):
+    """Grounding is the bottleneck, so the plain share is a deliberate knob and
+    must actually be honoured."""
+    import json as _json
+    from dhwani.build_benchmark import build as build_bench
+    from dhwani.sft_data import build as build_sft
+    from dhwani.split import split_benchmark
+
+    build_bench("procedural", 40, tmp_path / "b", seed=4)
+    split_benchmark(tmp_path / "b" / "benchmark.jsonl", tmp_path / "b", seed=0)
+    for ratio in (0.3, 0.5, 0.8):
+        s = build_sft(tmp_path / "b" / "benchmark_train.jsonl", tmp_path / "b" / "timelines.jsonl",
+                      tmp_path / f"sft_{ratio}.jsonl", plain_ratio=ratio, seed=0)
+        assert abs(s["plain_share"] - ratio) < 0.05, (ratio, s)
+        assert s["synthesised_plain"] > 0          # augmentation actually fired
+        rows = [_json.loads(l) for l in open(tmp_path / f"sft_{ratio}.jsonl")]
+        assert len(rows) == s["examples"]
+        # prompt format must match inference exactly
+        from dhwani.models import SYSTEM
+        assert rows[0]["messages"][0]["content"] == SYSTEM
+        assert rows[0]["messages"][1]["content"].startswith("Locate:")
+        _json.loads(rows[0]["target"])            # target is valid JSON intervals
+
+
+def test_sft_targets_are_parseable_by_the_metric(tmp_path):
+    """A target the scorer cannot read would train the model to emit unscoreable text."""
+    import json as _json
+    from dhwani.build_benchmark import build as build_bench
+    from dhwani.sft_data import build as build_sft
+    from dhwani.split import split_benchmark
+
+    build_bench("procedural", 20, tmp_path / "b", seed=6)
+    split_benchmark(tmp_path / "b" / "benchmark.jsonl", tmp_path / "b", seed=0)
+    build_sft(tmp_path / "b" / "benchmark_train.jsonl", tmp_path / "b" / "timelines.jsonl",
+              tmp_path / "sft.jsonl", plain_ratio=0.5, seed=0)
+    for line in open(tmp_path / "sft.jsonl"):
+        e = _json.loads(line)
+        assert parse_intervals(e["target"]) is not None
+
+
+def test_collator_masks_the_prompt_and_keeps_the_answer(tmp_path):
+    """Loss must fall only on the answer. If the mask is off by even one token
+    the model learns to echo our instruction text, and nothing about the metric
+    would reveal it."""
+    import numpy as np
+    import soundfile as sf
+    import torch
+
+    from dhwani.train_lora import GroundingCollator
+
+    wav = tmp_path / "clip.wav"
+    sf.write(wav, np.zeros(16000, dtype="float32"), 16000)
+
+    class StubTokenizer:
+        pad_token_id = 0
+        eos_token = " <eos>"
+
+        def __call__(self, text, add_special_tokens=False):
+            class R: pass
+            r = R(); r.input_ids = text.split()
+            return r
+
+    class StubProcessor:
+        tokenizer = StubTokenizer()
+
+        def apply_chat_template(self, conv, add_generation_prompt=True, tokenize=False):
+            # one token per word keeps the arithmetic checkable by hand
+            return "P1 P2 P3 P4"
+
+        def __call__(self, text, audio, sampling_rate, return_tensors, padding):
+            ids = [[hash(w) % 1000 + 1 for w in t.split()] for t in text]
+            width = max(len(i) for i in ids)
+            padded = [i + [0] * (width - len(i)) for i in ids]
+            return {"input_ids": torch.tensor(padded)}
+
+    c = GroundingCollator(StubProcessor())
+    ex = {"audio": str(wav),
+          "messages": [{"role": "system", "content": "sys"},
+                       {"role": "user", "content": "Locate: every dog"}],
+          "target": "[[1.0, 2.0]]"}
+    batch = c([ex])
+    labels, input_ids = batch["labels"], batch["input_ids"]
+
+    # prompt is 4 tokens -> first 4 masked, the answer tokens survive
+    assert (labels[0, :4] == -100).all(), labels[0, :4]
+    assert (labels[0, 4:] != -100).any()
+    # surviving labels equal the inputs there (teacher forcing on the answer)
+    keep = labels[0] != -100
+    assert torch.equal(labels[0][keep], input_ids[0][keep])
+    # padding is masked too
+    pad = input_ids[0] == 0
+    if pad.any():
+        assert (labels[0][pad] == -100).all()
+
+
+def test_collator_masks_each_row_of_a_batch_independently(tmp_path):
+    """A shared mask length would leak answer tokens from the shorter prompt."""
+    import numpy as np
+    import soundfile as sf
+    import torch
+
+    from dhwani.train_lora import GroundingCollator
+
+    wav = tmp_path / "c.wav"
+    sf.write(wav, np.zeros(16000, dtype="float32"), 16000)
+
+    class StubTokenizer:
+        pad_token_id = 0
+        eos_token = " <eos>"
+
+        def __call__(self, text, add_special_tokens=False):
+            class R: pass
+            r = R(); r.input_ids = text.split()
+            return r
+
+    class StubProcessor:
+        tokenizer = StubTokenizer()
+        _n = [2, 5]                       # different prompt lengths per row
+
+        def apply_chat_template(self, conv, add_generation_prompt=True, tokenize=False):
+            return " ".join(f"P{i}" for i in range(self._n.pop(0)))
+
+        def __call__(self, text, audio, sampling_rate, return_tensors, padding):
+            ids = [[i + 1 for i, _ in enumerate(t.split())] for t in text]
+            width = max(len(i) for i in ids)
+            return {"input_ids": torch.tensor([i + [0] * (width - len(i)) for i in ids])}
+
+    c = GroundingCollator(StubProcessor())
+    exs = [{"audio": str(wav), "messages": [{"role": "user", "content": "q"}], "target": "[]"},
+           {"audio": str(wav), "messages": [{"role": "user", "content": "q"}], "target": "[[1.0, 2.0]]"}]
+    labels = c(exs)["labels"]
+    assert (labels[0, :2] == -100).all() and (labels[0, 2:4] != -100).any()
+    assert (labels[1, :5] == -100).all() and (labels[1, 5:] != -100).any()
+
+
+def test_hybrid_selects_on_val_and_reports_on_test(tmp_path):
+    """Choosing the arm on the same queries it is reported on would be taking
+    the max of two noisy estimates and calling it a method."""
+    import json as _json
+    from dhwani.hybrid import main as hybrid_main
+    from dhwani.split import assign
+
+    # Construct two arms with a known, type-dependent winner.
+    qids = [f"clip_{i:04d}_q{j}" for i in range(120) for j in range(2)]
+    def write(run, better):
+        run.mkdir(parents=True, exist_ok=True)
+        with open(run / "predictions.jsonl", "w") as f:
+            for n, q in enumerate(qids):
+                qtype = "AFTER" if n % 2 == 0 else "ORDINAL"
+                good = (better == "agent") == (qtype == "AFTER")
+                s = score_query([(1.0, 2.0)] if good else [(9.0, 9.5)], [(1.0, 2.0)], False)
+                f.write(_json.dumps({"qid": q, "qtype": qtype, "answer": [[1.0, 2.0]], **s}) + "\n")
+    write(tmp_path / "direct", "direct")
+    write(tmp_path / "agent", "agent")
+
+    hybrid_main(["--direct", str(tmp_path / "direct"), "--agent", str(tmp_path / "agent"),
+                 "--out", str(tmp_path / "hyb")])
+    res = _json.loads((tmp_path / "hyb" / "summary.json").read_text())
+    assert res["choice"]["AFTER"] == "agent"
+    assert res["choice"]["ORDINAL"] == "direct"
+    # hybrid picks the winner for each type, so it beats both arms on test
+    assert res["by_type"]["ALL"]["f1@0.5"] == 1.0
+    assert res["arms"]["direct"]["ALL"]["f1@0.5"] < 1.0
+    assert res["arms"]["agent"]["ALL"]["f1@0.5"] < 1.0
+    # reported only on test clips
+    n_test = sum(1 for q in qids if assign(q.rsplit("_q", 1)[0], 0, 0.7, 0.15) == "test")
+    assert res["n_test"] == n_test
