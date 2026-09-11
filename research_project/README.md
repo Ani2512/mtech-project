@@ -75,3 +75,17 @@ tests/                            no GPU, no downloads
 CoMET-style training-free agent (decompose the condition, ground each part,
 combine) versus LoRA fine-tuning on composed queries. Both evaluated on the
 same benchmark plus the real-recording track.
+
+## Running it
+
+`phase1_kaggle.ipynb` is the recommended path. Kaggle gives 30 GPU hours a week
+and 12-hour sessions, and "Save & Run All (Commit)" executes the whole notebook
+server-side with the browser closed. Set **Accelerator → GPU** and **Internet →
+On** in the settings panel first, or cells 2 and 5 fail.
+
+`phase1.ipynb` is the Colab equivalent. It works, but free-tier Colab reclaims
+runtimes mid-job, which cost us an 80-minute run. If you use it, launch through
+`scripts_phase1_full.sh`, which is idempotent and resumes rather than restarting.
+
+Neither notebook is required: `scripts_phase1_full.sh` runs the whole pipeline
+unattended on any machine with a GPU.
