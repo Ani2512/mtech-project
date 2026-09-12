@@ -12,7 +12,10 @@ import subprocess
 import sys
 import time
 
-REPO = "/kaggle/working/mtech-project"
+# Clone OUTSIDE /kaggle/working. Kaggle publishes at most 500 output files, and
+# the clone (.git alone is hundreds) consumed the cap before results/ was
+# reached -- v2 completed and its summaries never made it into the output.
+REPO = "/kaggle/temp/mtech-project"
 WORK = f"{REPO}/research_project"
 BRANCH = "compositional-temporal-grounding"
 CACHE = "/kaggle/temp/hf"
