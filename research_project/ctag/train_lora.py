@@ -6,14 +6,14 @@ talker (speech synthesis) is irrelevant here and is not loaded.
 Mix rationale lives in docs/phase2_decomposition.md. Briefly: with perfect
 events the conditions are trivial (agent scores 1.000), while at the model's
 real grounding quality flawless condition logic still reaches only 0.263. So
-grounding is the binding constraint and `dhwani.sft_data --plain-ratio` should
+grounding is the binding constraint and `ctag.sft_data --plain-ratio` should
 stay high rather than drilling conditional phrasing.
 
-    python -m dhwani.train_lora --data data/esc50/sft_train.jsonl \
+    python -m ctag.train_lora --data data/esc50/sft_train.jsonl \
            --val data/esc50/sft_val.jsonl --out runs/lora_omni --epochs 2
 
 Then evaluate with the adapter:
-    python -m dhwani.run_zeroshot --model qwen2.5-omni --adapter runs/lora_omni \
+    python -m ctag.run_zeroshot --model qwen2.5-omni --adapter runs/lora_omni \
            --bench data/esc50/benchmark_test.jsonl --out runs/esc50/omni_lora
 """
 from __future__ import annotations

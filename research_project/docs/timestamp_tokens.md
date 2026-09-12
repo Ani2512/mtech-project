@@ -48,7 +48,7 @@ captioning.
 
 ## What we implement
 
-TEMPO's flat scheme, in `dhwani/timetokens.py`. With 20-second clips the
+TEMPO's flat scheme, in `ctag/timetokens.py`. With 20-second clips the
 vocabulary is small, and the anchor/offset scheme's advantage only appears for
 long-form audio where a flat vocabulary grows linearly with duration. That is
 the right swap if this is extended to hour-long recordings.
@@ -74,15 +74,15 @@ would be inert.
 ## Running it
 
 ```bash
-python -m dhwani.sft_data --bench data/esc50/benchmark_train.jsonl \
+python -m ctag.sft_data --bench data/esc50/benchmark_train.jsonl \
        --timelines data/esc50/timelines.jsonl --out data/esc50/sft_train_tt.jsonl \
        --plain-ratio 0.6 --time-tokens
 
-python -m dhwani.train_lora --data data/esc50/sft_train_tt.jsonl \
+python -m ctag.train_lora --data data/esc50/sft_train_tt.jsonl \
        --val data/esc50/sft_val_tt.jsonl --out runs/lora_omni_tt \
        --time-tokens --time-sigma 0.3 --time-lambda 0.5 --epochs 2
 
-python -m dhwani.run_zeroshot --model qwen2.5-omni --adapter runs/lora_omni_tt \
+python -m ctag.run_zeroshot --model qwen2.5-omni --adapter runs/lora_omni_tt \
        --bench data/esc50/benchmark_test.jsonl --out runs/esc50/test_lora_tt
 ```
 

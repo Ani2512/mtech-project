@@ -1,9 +1,9 @@
 import json
 import random
 
-from dhwani.metrics import matched_f1, parse_intervals, score_query, summarize, union_iou
-from dhwani.queries import generate
-from dhwani.timeline import Event, Timeline
+from ctag.metrics import matched_f1, parse_intervals, score_query, summarize, union_iou
+from ctag.queries import generate
+from ctag.timeline import Event, Timeline
 
 TL = Timeline(20.0, [
     Event("dog", 1.0, 2.0), Event("horn", 3.0, 4.0), Event("dog", 5.0, 6.0),
@@ -40,7 +40,7 @@ def test_generate_is_consistent_with_predicates():
         if q.qtype == "WHILE":
             assert q.answer == [e.interval for e in TL.while_(q.x, q.y)]
     # round-trips through JSON
-    from dhwani.queries import Query
+    from ctag.queries import Query
     for q in qs:
         assert Query.from_dict(json.loads(json.dumps(q.to_dict()))) == q
 
@@ -81,8 +81,8 @@ def test_summary_rejection_metrics():
 
 
 def test_end_to_end_procedural(tmp_path):
-    from dhwani.build_benchmark import build
-    from dhwani.run_zeroshot import main as run
+    from ctag.build_benchmark import build
+    from ctag.run_zeroshot import main as run
 
     counts = build("procedural", 8, tmp_path / "bench", seed=3)
     assert counts["WHILE"] > 0 and counts["ABSENT"] > 0
@@ -145,7 +145,7 @@ def test_rescore_recovers_parse_failures(tmp_path):
     """A parser improvement must be applicable to a finished run without
     re-running the model."""
     import json as _json
-    from dhwani.rescore import rescore
+    from ctag.rescore import rescore
 
     run = tmp_path / "run"
     run.mkdir()
@@ -168,7 +168,7 @@ def test_rescore_recovers_parse_failures(tmp_path):
 def test_localisation_separates_place_from_duration():
     """A perfectly centred but too-short interval and a displaced one both score
     0 at IoU>=0.5; centre error and duration ratio tell them apart."""
-    from dhwani.metrics import localisation
+    from ctag.metrics import localisation
 
     gold = [(10.0, 12.0)]
     short_but_centred = [(10.9, 11.1)]
@@ -191,7 +191,7 @@ def test_localisation_separates_place_from_duration():
 def test_agent_combine_matches_timeline_predicates():
     """The agent must apply exactly the semantics that define the ground truth,
     otherwise it is solving a different task."""
-    from dhwani.agent import combine
+    from ctag.agent import combine
 
     xs = [e.interval for e in TL.occ("dog")]
     horn = [e.interval for e in TL.occ("horn")]
@@ -214,8 +214,8 @@ def test_agent_with_oracle_grounder_is_perfect(tmp_path):
     """With perfect grounding the agent must score 1.000, or its composition
     disagrees with the ground truth somewhere."""
     import json as _json
-    from dhwani.build_benchmark import build
-    from dhwani.run_agent import main as run_agent
+    from ctag.build_benchmark import build
+    from ctag.run_agent import main as run_agent
 
     build("procedural", 15, tmp_path / "b", seed=5)
     run_agent(["--grounder", "oracle",
@@ -232,7 +232,7 @@ def test_oracle_grounder_matches_multiword_labels():
     """Queries carry 'glass_breaking' while timelines and prompts may use
     'glass breaking'. Normalising only one side makes the oracle silently
     return nothing for every multi-word sound."""
-    from dhwani.agent import oracle_grounder
+    from ctag.agent import oracle_grounder
 
     g = oracle_grounder({"c1": {"events": [
         {"label": "glass_breaking", "onset": 1.0, "offset": 2.0},
@@ -248,7 +248,7 @@ def test_oracle_grounder_matches_multiword_labels():
 def test_split_is_clip_level_and_stable():
     """Splitting by query would leak: queries from one clip share audio and
     timeline. And adding clips later must not reshuffle existing assignments."""
-    from dhwani.split import assign
+    from ctag.split import assign
 
     a = {c: assign(c, 0, 0.7, 0.15) for c in [f"clip_{i:04d}" for i in range(400)]}
     assert set(a.values()) == {"train", "val", "test"}
@@ -264,8 +264,8 @@ def test_split_is_clip_level_and_stable():
 
 def test_split_benchmark_has_no_clip_overlap(tmp_path):
     import json as _json
-    from dhwani.build_benchmark import build
-    from dhwani.split import split_benchmark
+    from ctag.build_benchmark import build
+    from ctag.split import split_benchmark
 
     build("procedural", 40, tmp_path / "b", seed=2)
     stats = split_benchmark(tmp_path / "b" / "benchmark.jsonl", tmp_path / "b", seed=0)
@@ -281,9 +281,9 @@ def test_sft_mix_hits_the_requested_plain_share(tmp_path):
     """Grounding is the bottleneck, so the plain share is a deliberate knob and
     must actually be honoured."""
     import json as _json
-    from dhwani.build_benchmark import build as build_bench
-    from dhwani.sft_data import build as build_sft
-    from dhwani.split import split_benchmark
+    from ctag.build_benchmark import build as build_bench
+    from ctag.sft_data import build as build_sft
+    from ctag.split import split_benchmark
 
     build_bench("procedural", 40, tmp_path / "b", seed=4)
     split_benchmark(tmp_path / "b" / "benchmark.jsonl", tmp_path / "b", seed=0)
@@ -295,7 +295,7 @@ def test_sft_mix_hits_the_requested_plain_share(tmp_path):
         rows = [_json.loads(l) for l in open(tmp_path / f"sft_{ratio}.jsonl")]
         assert len(rows) == s["examples"]
         # prompt format must match inference exactly
-        from dhwani.models import SYSTEM
+        from ctag.models import SYSTEM
         assert rows[0]["messages"][0]["content"] == SYSTEM
         assert rows[0]["messages"][1]["content"].startswith("Locate:")
         _json.loads(rows[0]["target"])            # target is valid JSON intervals
@@ -304,9 +304,9 @@ def test_sft_mix_hits_the_requested_plain_share(tmp_path):
 def test_sft_targets_are_parseable_by_the_metric(tmp_path):
     """A target the scorer cannot read would train the model to emit unscoreable text."""
     import json as _json
-    from dhwani.build_benchmark import build as build_bench
-    from dhwani.sft_data import build as build_sft
-    from dhwani.split import split_benchmark
+    from ctag.build_benchmark import build as build_bench
+    from ctag.sft_data import build as build_sft
+    from ctag.split import split_benchmark
 
     build_bench("procedural", 20, tmp_path / "b", seed=6)
     split_benchmark(tmp_path / "b" / "benchmark.jsonl", tmp_path / "b", seed=0)
@@ -365,7 +365,7 @@ def test_collator_masks_survive_audio_placeholder_expansion(tmp_path):
     import soundfile as sf
     import torch
 
-    from dhwani.train_lora import GroundingCollator
+    from ctag.train_lora import GroundingCollator
 
     wav = tmp_path / "c.wav"
     sf.write(wav, np.zeros(16000, dtype="float32"), 16000)
@@ -392,7 +392,7 @@ def test_collator_masks_each_row_of_a_batch_independently(tmp_path):
     import numpy as np
     import soundfile as sf
 
-    from dhwani.train_lora import GroundingCollator
+    from ctag.train_lora import GroundingCollator
 
     wav = tmp_path / "c.wav"
     sf.write(wav, np.zeros(16000, dtype="float32"), 16000)
@@ -417,8 +417,8 @@ def test_hybrid_selects_on_val_and_reports_on_test(tmp_path):
     """Choosing the arm on the same queries it is reported on would be taking
     the max of two noisy estimates and calling it a method."""
     import json as _json
-    from dhwani.hybrid import main as hybrid_main
-    from dhwani.split import assign
+    from ctag.hybrid import main as hybrid_main
+    from ctag.split import assign
 
     # Construct two arms with a known, type-dependent winner.
     qids = [f"clip_{i:04d}_q{j}" for i in range(120) for j in range(2)]
@@ -450,7 +450,7 @@ def test_hybrid_selects_on_val_and_reports_on_test(tmp_path):
 # ---------------------------------------------------------------- time tokens
 
 def test_time_vocab_size_and_quantisation():
-    from dhwani.timetokens import EMPTY_TOKEN, TimeVocab
+    from ctag.timetokens import EMPTY_TOKEN, TimeVocab
 
     v = TimeVocab(max_seconds=30.0, resolution=0.1)
     assert len(v.times) == 301 and len(v.tokens) == 302      # + the empty token
@@ -470,7 +470,7 @@ def test_time_vocab_size_and_quantisation():
 
 
 def test_time_token_roundtrip():
-    from dhwani.timetokens import TimeVocab
+    from ctag.timetokens import TimeVocab
 
     v = TimeVocab(30.0, 0.1)
     got = v.decode(v.encode([(0.65, 3.15), (8.87, 11.37)]))
@@ -486,7 +486,7 @@ def test_time_tokens_are_one_token_each_for_the_real_tokenizer_contract():
     """The whole point is one categorical decision per timestamp. This checks the
     string form is atomic and unambiguous, which is what lets add_tokens make it
     a single id."""
-    from dhwani.timetokens import TimeVocab
+    from ctag.timetokens import TimeVocab
 
     v = TimeVocab(20.0, 0.1)
     enc = v.encode([(1.2, 3.4)])
@@ -498,7 +498,7 @@ def test_time_tokens_are_one_token_each_for_the_real_tokenizer_contract():
 def test_gaussian_soft_labels_reward_near_misses():
     """Cross-entropy on a one-hot target calls 0.1 s off exactly as wrong as
     10 s off. TEMPO's soft target is what makes the vocabulary ordinal."""
-    from dhwani.timetokens import TimeVocab
+    from ctag.timetokens import TimeVocab
 
     v = TimeVocab(30.0, 0.1)
     q = v.soft_labels(10.0, sigma=0.3)
@@ -514,7 +514,7 @@ def test_gaussian_soft_labels_reward_near_misses():
 
 
 def test_soft_labels_survive_a_target_outside_the_range():
-    from dhwani.timetokens import TimeVocab
+    from ctag.timetokens import TimeVocab
 
     v = TimeVocab(5.0, 0.1)
     q = v.soft_labels(500.0, sigma=0.3)
@@ -525,7 +525,7 @@ def test_soft_labels_survive_a_target_outside_the_range():
 def test_time_token_answers_parse_through_the_scoring_path():
     """A fine-tuned model emits these; the runner must score them without
     special-casing, or the two arms are not comparable."""
-    from dhwani.timetokens import TimeVocab
+    from ctag.timetokens import TimeVocab
 
     v = TimeVocab(30.0, 0.1)
     gold = [(1.0, 2.0), (5.0, 6.0)]
@@ -546,9 +546,9 @@ def test_parse_intervals_reads_time_tokens_without_special_casing():
 
 def test_sft_data_can_emit_time_token_targets(tmp_path):
     import json as _json
-    from dhwani.build_benchmark import build as build_bench
-    from dhwani.sft_data import build as build_sft
-    from dhwani.split import split_benchmark
+    from ctag.build_benchmark import build as build_bench
+    from ctag.sft_data import build as build_sft
+    from ctag.split import split_benchmark
 
     build_bench("procedural", 20, tmp_path / "b", seed=7)
     split_benchmark(tmp_path / "b" / "benchmark.jsonl", tmp_path / "b", seed=0)
@@ -569,8 +569,8 @@ def test_time_loss_rewards_near_misses_and_ignores_non_timestamp_positions():
     digits, and nothing downstream would reveal it."""
     import torch
 
-    from dhwani.timetokens import TimeVocab
-    from dhwani.train_lora import time_loss_terms
+    from ctag.timetokens import TimeVocab
+    from ctag.train_lora import time_loss_terms
 
     v = TimeVocab(max_seconds=2.0, resolution=0.1)        # 21 times + empty
     T = len(v.times)
@@ -606,7 +606,7 @@ def test_time_loss_rewards_near_misses_and_ignores_non_timestamp_positions():
 # ------------------------------------------------------------- recall bias
 
 def test_f_beta_weights_recall_and_reduces_to_f1_at_beta_one():
-    from dhwani.recall_bias import MEASURED_BETA, f_beta
+    from ctag.recall_bias import MEASURED_BETA, f_beta
 
     gold = [(1.0, 2.0), (5.0, 6.0), (9.0, 10.0)]
     missing_one = [(1.0, 2.0), (5.0, 6.0)]                 # recall 2/3, precision 1
@@ -630,7 +630,7 @@ def test_f_beta_weights_recall_and_reduces_to_f1_at_beta_one():
 def test_measured_beta_comes_from_the_degradation_slopes():
     """beta is read off the measured asymmetry rather than tuned; guard the value
     so a careless edit cannot quietly turn it into a hyperparameter."""
-    from dhwani.recall_bias import MEASURED_ASYMMETRY, MEASURED_BETA
+    from ctag.recall_bias import MEASURED_ASYMMETRY, MEASURED_BETA
 
     assert abs(MEASURED_ASYMMETRY - 5.60) < 0.01
     assert abs(MEASURED_BETA ** 2 - MEASURED_ASYMMETRY) < 1e-9
@@ -638,7 +638,7 @@ def test_measured_beta_comes_from_the_degradation_slopes():
 
 
 def test_union_decode_raises_recall_across_samples():
-    from dhwani.recall_bias import union_decode
+    from ctag.recall_bias import union_decode
 
     # three samples, each missing something different
     s1 = [(1.0, 2.0), (5.0, 6.0)]
@@ -663,8 +663,8 @@ def test_preference_pairs_always_reject_under_detection():
     a miss, so penalising it would optimise the wrong direction."""
     import random as _random
 
-    from dhwani.metrics import parse_intervals
-    from dhwani.recall_bias import make_preference_pairs
+    from ctag.metrics import parse_intervals
+    from ctag.recall_bias import make_preference_pairs
 
     exs = [{"audio": "a.wav", "messages": [], "target": "[[1.0, 2.0], [5.0, 6.0], [9.0, 10.0]]"},
            {"audio": "b.wav", "messages": [], "target": "[[1.0, 2.0]]"},
@@ -683,7 +683,7 @@ def test_preference_pairs_match_the_target_format():
     """chosen and rejected must differ only in content, not in notation."""
     import random as _random
 
-    from dhwani.recall_bias import make_preference_pairs
+    from ctag.recall_bias import make_preference_pairs
 
     exs = [{"audio": "a.wav", "messages": [], "target": "<t=1.0><t=2.0><t=5.0><t=6.0>"}]
     p = make_preference_pairs(exs, _random.Random(0))[0]
@@ -694,8 +694,8 @@ def test_union_decoding_path_end_to_end(tmp_path):
     """--samples must union rather than overwrite, and must still report a genuine
     parse failure when every sample is unreadable."""
     import json as _json
-    from dhwani.build_benchmark import build
-    from dhwani.run_zeroshot import main as run
+    from ctag.build_benchmark import build
+    from ctag.run_zeroshot import main as run
 
     build("procedural", 6, tmp_path / "b", seed=11)
     run(["--model", "mock:first_only", "--bench", str(tmp_path / "b" / "benchmark.jsonl"),
@@ -719,7 +719,7 @@ def test_f_beta_is_reported_in_summaries():
 def test_every_called_name_in_the_package_resolves():
     """Catch a function that is called but no longer defined.
 
-    A patch that spliced out a block of dhwani/train_lora.py removed build_model
+    A patch that spliced out a block of ctag/train_lora.py removed build_model
     while leaving main()'s call to it. The module still imported, every existing
     test still passed, and the failure only appeared on a GPU after the model had
     loaded. This is a cheap static check for that whole class of mistake.
@@ -728,7 +728,7 @@ def test_every_called_name_in_the_package_resolves():
     import builtins
     import pathlib
 
-    pkg = pathlib.Path(__file__).resolve().parent.parent / "dhwani"
+    pkg = pathlib.Path(__file__).resolve().parent.parent / "ctag"
     problems = []
     for path in sorted(pkg.glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -778,7 +778,7 @@ def test_bf16_is_rejected_when_only_emulated():
     import sys
     import types
 
-    from dhwani import train_lora
+    from ctag import train_lora
 
     real = sys.modules.get("torch")
     try:

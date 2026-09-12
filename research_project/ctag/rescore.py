@@ -5,8 +5,8 @@ Re-running a model to test a parser change would be wasteful and would also
 change the thing being measured, so predictions.jsonl keeps the raw text and
 this re-scores it offline.
 
-    python -m dhwani.rescore runs/esc50/qwen2_audio
-    python -m dhwani.rescore runs/esc50/qwen2_audio --in-place
+    python -m ctag.rescore runs/esc50/qwen2_audio
+    python -m ctag.rescore runs/esc50/qwen2_audio --in-place
 """
 from __future__ import annotations
 

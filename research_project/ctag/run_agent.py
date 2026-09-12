@@ -1,14 +1,14 @@
 """Score the decompose-and-combine agent on the benchmark.
 
     # ceiling: perfect grounding, so any error is the composition's fault
-    python -m dhwani.run_agent --grounder oracle --bench data/esc50/benchmark.jsonl \
+    python -m ctag.run_agent --grounder oracle --bench data/esc50/benchmark.jsonl \
            --timelines data/esc50/timelines.jsonl --out runs/esc50/agent_oracle
 
     # degradation curve: how good must grounding be for decomposition to work?
-    python -m dhwani.run_agent --grounder oracle --jitter 0.5 --drop 0.2 ... 
+    python -m ctag.run_agent --grounder oracle --jitter 0.5 --drop 0.2 ... 
 
     # real model as the grounder (needs a GPU)
-    python -m dhwani.run_agent --grounder qwen2.5-omni ...
+    python -m ctag.run_agent --grounder qwen2.5-omni ...
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ def main(argv=None):
     ap.add_argument("--bench", required=True)
     ap.add_argument("--timelines", default=None, help="required for --grounder oracle")
     ap.add_argument("--grounder", required=True,
-                    help="'oracle' or a model name from dhwani.models")
+                    help="'oracle' or a model name from ctag.models")
     ap.add_argument("--jitter", type=float, default=0.0, help="+/- seconds of boundary noise")
     ap.add_argument("--drop", type=float, default=0.0, help="probability of missing an occurrence")
     ap.add_argument("--spurious", type=float, default=0.0, help="probability of a false detection")

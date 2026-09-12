@@ -6,7 +6,7 @@ be scored on a different question about that same audio. Splits are therefore
 by clip id, and the split is a deterministic function of (clip_id, seed) so it
 survives regenerating the benchmark.
 
-    python -m dhwani.split --bench data/esc50/benchmark.jsonl --out data/esc50
+    python -m ctag.split --bench data/esc50/benchmark.jsonl --out data/esc50
 """
 from __future__ import annotations
 

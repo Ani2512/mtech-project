@@ -1,6 +1,6 @@
 """Build supervised fine-tuning examples from a benchmark split.
 
-The prompt format here is byte-identical to inference (`dhwani.models.SYSTEM`
+The prompt format here is byte-identical to inference (`ctag.models.SYSTEM`
 and `prompt_for`), so the model is never trained on one phrasing and evaluated
 on another.
 
@@ -11,7 +11,7 @@ condition logic reaches only 0.263. Training is therefore weighted towards
 plain grounding. Extra PLAIN examples are synthesised for every label in every
 training clip, which costs nothing because the timeline already has the answer.
 
-    python -m dhwani.sft_data --bench data/esc50/benchmark_train.jsonl \
+    python -m ctag.sft_data --bench data/esc50/benchmark_train.jsonl \
            --timelines data/esc50/timelines.jsonl --out data/esc50/sft_train.jsonl
 """
 from __future__ import annotations
@@ -32,7 +32,7 @@ def target_string(intervals, time_tokens: bool = False) -> str:
     """Exactly the format the parser expects and the metric scores.
 
     With time_tokens, emit atomic timestamp tokens instead of digit strings;
-    see dhwani/timetokens.py for why and for the prior work it follows.
+    see ctag/timetokens.py for why and for the prior work it follows.
     """
     if time_tokens:
         global _TIME_VOCAB

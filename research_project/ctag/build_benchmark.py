@@ -1,7 +1,7 @@
 """Compose clips and generate queries -> <out>/benchmark.jsonl + <out>/wav/*.wav + <out>/timelines.jsonl
 
-    python -m dhwani.build_benchmark --source procedural --n-clips 60 --out data/proc
-    python -m dhwani.build_benchmark --source esc50 --n-clips 300 --out data/esc50_bench [--esc50-root data/esc50]
+    python -m ctag.build_benchmark --source procedural --n-clips 60 --out data/proc
+    python -m ctag.build_benchmark --source esc50 --n-clips 300 --out data/esc50_bench [--esc50-root data/esc50]
 """
 from __future__ import annotations
 

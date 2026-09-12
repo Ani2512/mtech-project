@@ -1,7 +1,7 @@
 # Decomposition ceiling: where the conditional failure actually comes from
 
 A conditional query names a target X and usually a reference Y. The
-decompose-and-combine agent (`dhwani/agent.py`) never asks a model to honour
+decompose-and-combine agent (`ctag/agent.py`) never asks a model to honour
 the condition. It asks only for plain groundings of X and of Y, then applies
 the condition itself using the same predicates that define the ground truth.
 
@@ -96,12 +96,12 @@ Consequences, in priority order:
 ## 5. Reproduce
 
 ```bash
-python -m dhwani.run_agent --grounder oracle --bench data/esc50/benchmark.jsonl \
+python -m ctag.run_agent --grounder oracle --bench data/esc50/benchmark.jsonl \
        --timelines data/esc50/timelines.jsonl --out runs/esc50/agent_oracle
-python -m dhwani.run_agent --grounder oracle --jitter 1.5 --drop 0.35 --spurious 0.35 \
+python -m ctag.run_agent --grounder oracle --jitter 1.5 --drop 0.35 --spurious 0.35 \
        --bench data/esc50/benchmark.jsonl --timelines data/esc50/timelines.jsonl \
        --out runs/esc50/agent_calibrated
 # with a real model as the grounder (GPU):
-python -m dhwani.run_agent --grounder qwen2.5-omni --bench data/esc50/benchmark.jsonl \
+python -m ctag.run_agent --grounder qwen2.5-omni --bench data/esc50/benchmark.jsonl \
        --out runs/esc50/agent_omni
 ```

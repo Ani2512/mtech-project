@@ -88,7 +88,7 @@ class TimeVocab:
 
     def decode(self, text: str):
         """Tokens back to intervals. Returns [] for the empty token, and None if
-        nothing parseable is present, matching dhwani.metrics.parse_intervals."""
+        nothing parseable is present, matching ctag.metrics.parse_intervals."""
         if text is None:
             return None
         if EMPTY_TOKEN in text:

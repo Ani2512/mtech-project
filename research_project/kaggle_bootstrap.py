@@ -61,7 +61,7 @@ step("benchmark")
 if os.path.exists("data/esc50/benchmark.jsonl"):
     print("already built")
 else:
-    run([sys.executable, "-m", "dhwani.build_benchmark", "--source", "esc50",
+    run([sys.executable, "-m", "ctag.build_benchmark", "--source", "esc50",
          "--n-clips", "300", "--p-overlap", "0.45", "--out", "data/esc50",
          "--esc50-root", "data/esc50_raw"], check=True)
 
@@ -69,7 +69,7 @@ step("splits")
 if os.path.exists("data/esc50/benchmark_train.jsonl"):
     print("already split")
 else:
-    run([sys.executable, "-m", "dhwani.split", "--bench", "data/esc50/benchmark.jsonl",
+    run([sys.executable, "-m", "ctag.split", "--bench", "data/esc50/benchmark.jsonl",
          "--out", "data/esc50"], check=True)
 
 step("training data")
@@ -78,7 +78,7 @@ for split in ("train", "val"):
         out = f"data/esc50/sft_{split}{suffix}.jsonl"
         if os.path.exists(out):
             continue
-        cmd = [sys.executable, "-m", "dhwani.sft_data",
+        cmd = [sys.executable, "-m", "ctag.sft_data",
                "--bench", f"data/esc50/benchmark_{split}.jsonl",
                "--timelines", "data/esc50/timelines.jsonl",
                "--out", out, "--plain-ratio", "0.6"]
@@ -105,7 +105,7 @@ chosen = None
 for amp, why in attempts:
     print(f"\n--- trying --amp {amp}  ({why})", flush=True)
     t0 = time.time()
-    rc = run([sys.executable, "-m", "dhwani.train_lora",
+    rc = run([sys.executable, "-m", "ctag.train_lora",
               "--data", "data/esc50/sft_train.jsonl", "--out", f"/kaggle/temp/smoke_{amp}",
               "--max-steps", "20", "--grad-accum", "1", "--amp", amp]).returncode
     secs = (time.time() - t0)
@@ -122,7 +122,7 @@ if chosen:
     epoch_h = 2300 * per_step / 3600
     print(f"USE --amp {chosen}.  {per_step:.1f} s/example, so one epoch over 2300 "
           f"examples is about {epoch_h:.1f} h.")
-    print(f"Run phase 2 with:  DHWANI_AMP={chosen} %run /kaggle/working/phase2.py")
+    print(f"Run phase 2 with:  CTAG_AMP={chosen} %run /kaggle/working/phase2.py")
     if epoch_h > 5:
         print("WARNING: that is slow enough that two arms will not fit one session.")
 else:

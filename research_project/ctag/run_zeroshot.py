@@ -1,6 +1,6 @@
 """Run one backend over a benchmark -> predictions.jsonl + summary.json
 
-    python -m dhwani.run_zeroshot --model mock:first_only --bench data/proc/benchmark.jsonl --out runs/mock_first
+    python -m ctag.run_zeroshot --model mock:first_only --bench data/proc/benchmark.jsonl --out runs/mock_first
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def main(argv=None):
                     help="override the automatic fit (default: pick from GPU memory)")
     ap.add_argument("--max-new-tokens", type=int, default=96,
                     help="an interval list is short; 96 is ample and keeps decoding fast")
-    ap.add_argument("--adapter", default=None, help="path to a LoRA adapter from dhwani.train_lora")
+    ap.add_argument("--adapter", default=None, help="path to a LoRA adapter from ctag.train_lora")
     ap.add_argument("--samples", type=int, default=1,
                     help="sample k answers and union them; raises recall, which the "
                          "measured 5.6x miss/false-alarm asymmetry makes a good trade")

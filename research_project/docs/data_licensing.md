@@ -4,7 +4,7 @@
 |---|---|---|---|
 | ESC-50 | isolated event bank for composition | CC BY-NC 3.0 | 2,000 5-s clips, 50 classes; download via GitHub release zip (~600 MB). Non-commercial only. |
 | FSD50K | larger event bank (optional) | CC BY 4.0 (clip-level varies, mostly CC0/CC BY) | 51k clips, weak labels; use only classes with short single-event clips. |
-| Procedural tones/noises | tests, dry runs | none | generated in `dhwani/compose.py` |
+| Procedural tones/noises | tests, dry runs | none | generated in `ctag/compose.py` |
 | DESED real validation/eval | real-recording track | CC BY 4.0 (recordings from AudioSet/Freesound) | strong labels, 10-s domestic clips |
 | TAG-Bench (2609.01542) | real-recording track, comparison to published numbers | CC BY 4.0 | 149.5 h drawn from AudioSet-strong, AudioCaps, Clotho, DESED, speech |
 | AEGBench + Auto-AEG corpus (2607.04383) | real-recording track; phase 2 SFT data | CC BY 4.0, code MIT | 3,427 human-verified items |

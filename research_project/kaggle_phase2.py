@@ -32,9 +32,9 @@ TEST = "data/esc50/benchmark_test.jsonl"
 os.environ.setdefault("HF_HOME", "/kaggle/temp/hf")
 os.chdir(WORK)
 
-EPOCHS = os.environ.get("DHWANI_EPOCHS", "1")
+EPOCHS = os.environ.get("CTAG_EPOCHS", "1")
 # Which mixed-precision setting the bootstrap found to actually train on this card.
-AMP = os.environ.get("DHWANI_AMP", "none")
+AMP = os.environ.get("CTAG_AMP", "none")
 print(f"[phase2] epochs={EPOCHS}  amp={AMP}")
 
 
@@ -54,47 +54,47 @@ ok = True
 
 # --- arm C first: it is the main comparison ---------------------------------
 ok &= run("train arm C (text timestamps)",
-          ["dhwani.train_lora", "--data", "data/esc50/sft_train.jsonl",
+          ["ctag.train_lora", "--data", "data/esc50/sft_train.jsonl",
            "--val", "data/esc50/sft_val.jsonl", "--out", "/kaggle/temp/lora_text",
            "--epochs", EPOCHS, "--amp", AMP],
           "/kaggle/temp/lora_text/adapter_model.safetensors")
 ok &= run("eval arm C",
-          ["dhwani.run_zeroshot", "--model", "qwen2.5-omni", "--adapter", "/kaggle/temp/lora_text",
+          ["ctag.run_zeroshot", "--model", "qwen2.5-omni", "--adapter", "/kaggle/temp/lora_text",
            "--bench", TEST, "--out", "runs/esc50/test_lora_text"],
           "runs/esc50/test_lora_text/summary.json")
 
 # --- cheap untrained baselines, so arm C has something to be compared against
 ok &= run("arm A (direct prompting)",
-          ["dhwani.run_zeroshot", "--model", "qwen2.5-omni", "--bench", TEST,
+          ["ctag.run_zeroshot", "--model", "qwen2.5-omni", "--bench", TEST,
            "--out", "runs/esc50/test_direct"],
           "runs/esc50/test_direct/summary.json")
 ok &= run("arm B (decompose and combine)",
-          ["dhwani.run_agent", "--grounder", "qwen2.5-omni", "--bench", TEST,
+          ["ctag.run_agent", "--grounder", "qwen2.5-omni", "--bench", TEST,
            "--out", "runs/esc50/test_agent"],
           "runs/esc50/test_agent/summary.json")
 run("arm D (hybrid, selection on val)",
-    ["dhwani.hybrid", "--direct", "runs/esc50/test_direct",
+    ["ctag.hybrid", "--direct", "runs/esc50/test_direct",
      "--agent", "runs/esc50/test_agent", "--out", "runs/esc50/test_hybrid"],
     "runs/esc50/test_hybrid/summary.json")
 
 # --- arm E: a reproduction of published work, so it yields if time runs short
 ok &= run("train arm E (timestamp tokens)",
-          ["dhwani.train_lora", "--data", "data/esc50/sft_train_tt.jsonl",
+          ["ctag.train_lora", "--data", "data/esc50/sft_train_tt.jsonl",
            "--val", "data/esc50/sft_val_tt.jsonl", "--out", "/kaggle/temp/lora_tt",
            "--epochs", EPOCHS, "--amp", AMP,
            "--time-tokens", "--time-sigma", "0.3", "--time-lambda", "0.5"],
           "/kaggle/temp/lora_tt/adapter_model.safetensors")
 ok &= run("eval arm E",
-          ["dhwani.run_zeroshot", "--model", "qwen2.5-omni", "--adapter", "/kaggle/temp/lora_tt",
+          ["ctag.run_zeroshot", "--model", "qwen2.5-omni", "--adapter", "/kaggle/temp/lora_tt",
            "--bench", TEST, "--out", "runs/esc50/test_lora_tt"],
           "runs/esc50/test_lora_tt/summary.json")
 
 # --- recall-biased decoding last: k forward passes per query is the priciest item.
 # k=3 rather than 5 keeps the run inside one session; simulations put the optimum
 # at k=5/2 votes but k=3 captures most of the gain (docs/recall_bias.md).
-K = os.environ.get("DHWANI_UNION_K", "3")
+K = os.environ.get("CTAG_UNION_K", "3")
 ok &= run(f"recall-biased decoding (k={K}, 2 votes)",
-          ["dhwani.run_zeroshot", "--model", "qwen2.5-omni", "--bench", TEST,
+          ["ctag.run_zeroshot", "--model", "qwen2.5-omni", "--bench", TEST,
            "--out", "runs/esc50/test_union", "--samples", K, "--min-votes", "2",
            "--temperature", "0.7"],
           "runs/esc50/test_union/summary.json")

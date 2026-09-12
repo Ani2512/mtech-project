@@ -22,32 +22,32 @@ the contribution is the decomposition and the paper should say so.
 
 ```bash
 # 1. benchmark and a leak-free split (clip-level, stable under regeneration)
-python -m dhwani.build_benchmark --source esc50 --n-clips 300 --p-overlap 0.45 \
+python -m ctag.build_benchmark --source esc50 --n-clips 300 --p-overlap 0.45 \
        --out data/esc50 --esc50-root data/esc50_raw
-python -m dhwani.split --bench data/esc50/benchmark.jsonl --out data/esc50
+python -m ctag.split --bench data/esc50/benchmark.jsonl --out data/esc50
 
 # 2. training data, weighted towards plain grounding
-python -m dhwani.sft_data --bench data/esc50/benchmark_train.jsonl \
+python -m ctag.sft_data --bench data/esc50/benchmark_train.jsonl \
        --timelines data/esc50/timelines.jsonl --out data/esc50/sft_train.jsonl \
        --plain-ratio 0.6
-python -m dhwani.sft_data --bench data/esc50/benchmark_val.jsonl \
+python -m ctag.sft_data --bench data/esc50/benchmark_val.jsonl \
        --timelines data/esc50/timelines.jsonl --out data/esc50/sft_val.jsonl \
        --plain-ratio 0.6
 
 # 3. arms A and B on the test split
-python -m dhwani.run_zeroshot --model qwen2.5-omni \
+python -m ctag.run_zeroshot --model qwen2.5-omni \
        --bench data/esc50/benchmark_test.jsonl --out runs/esc50/test_direct
-python -m dhwani.run_agent --grounder qwen2.5-omni \
+python -m ctag.run_agent --grounder qwen2.5-omni \
        --bench data/esc50/benchmark_test.jsonl --out runs/esc50/test_agent
 
 # 4. arm C
-python -m dhwani.train_lora --data data/esc50/sft_train.jsonl \
+python -m ctag.train_lora --data data/esc50/sft_train.jsonl \
        --val data/esc50/sft_val.jsonl --out runs/lora_omni --epochs 2
-python -m dhwani.run_zeroshot --model qwen2.5-omni --adapter runs/lora_omni \
+python -m ctag.run_zeroshot --model qwen2.5-omni --adapter runs/lora_omni \
        --bench data/esc50/benchmark_test.jsonl --out runs/esc50/test_lora
 
 # 5. arm D (no inference; selection on val, reported on test)
-python -m dhwani.hybrid --direct runs/esc50/qwen25_omni --agent runs/esc50/agent_omni \
+python -m ctag.hybrid --direct runs/esc50/qwen25_omni --agent runs/esc50/agent_omni \
        --out runs/esc50/hybrid
 ```
 

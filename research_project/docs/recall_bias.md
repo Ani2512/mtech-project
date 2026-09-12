@@ -40,7 +40,7 @@ grounding benchmarks cannot.
 
 F1 weights precision and recall equally, which the data says is wrong. Use
 F-beta with `beta² = 5.60`, so `beta = 2.37`. **Beta is read off the degradation
-slopes, not tuned.** `dhwani/recall_bias.py` exposes it as `MEASURED_BETA`, and
+slopes, not tuned.** `ctag/recall_bias.py` exposes it as `MEASURED_BETA`, and
 a test pins the value so it cannot quietly become a hyperparameter.
 
 The effect on a concrete case, three gold intervals:

@@ -49,7 +49,7 @@ def _unique_reference(ys: list[Interval]) -> Interval | None:
 
 def combine(qtype: str, xs: list[Interval], ys: list[Interval],
             k: int | str | None = None, window: float | None = None) -> list[Interval]:
-    """Apply the condition to grounded intervals. Mirrors dhwani.timeline."""
+    """Apply the condition to grounded intervals. Mirrors ctag.timeline."""
     xs, ys = _sorted(xs), _sorted(ys)
     if qtype in ("PLAIN", "ABSENT"):
         return xs

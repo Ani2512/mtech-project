@@ -1,4 +1,4 @@
-# Project Dhwani — compositional temporal audio grounding
+# Compositional Temporal Audio Grounding
 
 **Task.** Given an audio recording and a query with a temporal condition,
 return *every* time interval that satisfies it, or an empty list if none does.
@@ -34,17 +34,17 @@ pip install -r requirements.txt
 python -m pytest tests -q
 
 # procedural benchmark + mock backends, no GPU, no downloads
-python -m dhwani.build_benchmark --source procedural --n-clips 60 --out data/proc
-python -m dhwani.run_zeroshot --model mock:ignore_condition --bench data/proc/benchmark.jsonl --out runs/mock_ignore
-python -m dhwani.run_zeroshot --model mock:first_only      --bench data/proc/benchmark.jsonl --out runs/mock_first
+python -m ctag.build_benchmark --source procedural --n-clips 60 --out data/proc
+python -m ctag.run_zeroshot --model mock:ignore_condition --bench data/proc/benchmark.jsonl --out runs/mock_ignore
+python -m ctag.run_zeroshot --model mock:first_only      --bench data/proc/benchmark.jsonl --out runs/mock_first
 
 # composed benchmark from ESC-50 (downloads ~600 MB once)
-python -m dhwani.build_benchmark --source esc50 --n-clips 300 --out data/esc50_bench
+python -m ctag.build_benchmark --source esc50 --n-clips 300 --out data/esc50_bench
 
 # real models (GPU runtime)
-python -m dhwani.run_zeroshot --model qwen2.5-omni --bench data/esc50_bench/benchmark.jsonl --out runs/q25o
-python -m dhwani.run_zeroshot --model qwen2-audio  --bench data/esc50_bench/benchmark.jsonl --out runs/q2a
-python -m dhwani.run_zeroshot --model gemini       --bench data/esc50_bench/benchmark.jsonl --out runs/gemini   # needs GEMINI_API_KEY
+python -m ctag.run_zeroshot --model qwen2.5-omni --bench data/esc50_bench/benchmark.jsonl --out runs/q25o
+python -m ctag.run_zeroshot --model qwen2-audio  --bench data/esc50_bench/benchmark.jsonl --out runs/q2a
+python -m ctag.run_zeroshot --model gemini       --bench data/esc50_bench/benchmark.jsonl --out runs/gemini   # needs GEMINI_API_KEY
 ```
 
 Outputs per run: `predictions.jsonl` (query, raw model text, parsed intervals,
@@ -55,7 +55,7 @@ parse-failure rate).
 ## Layout
 
 ```
-dhwani/
+ctag/
   timeline.py        Event / Timeline and the predicates behind every condition type
   queries.py         query templates + ground-truth generation from a Timeline
   compose.py         build timelines + mixed audio (procedural or ESC-50 event bank)

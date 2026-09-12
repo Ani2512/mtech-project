@@ -10,7 +10,7 @@ if the choice is made on validation clips and reported on test clips. Selecting
 on the test set and reporting the same numbers would be choosing the maximum of
 two noisy estimates and calling it a method.
 
-    python -m dhwani.hybrid --direct runs/esc50/qwen25_omni --agent runs/esc50/agent_omni \
+    python -m ctag.hybrid --direct runs/esc50/qwen25_omni --agent runs/esc50/agent_omni \
            --out runs/esc50/hybrid
 """
 from __future__ import annotations
