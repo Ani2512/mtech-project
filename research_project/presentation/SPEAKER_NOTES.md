@@ -364,20 +364,6 @@ Thank you. I'm happy to take questions.
 
 ---
 
-## Slide 19 — Backup: full test-split results
-
-*(Don't present this. Flip to it if someone asks for the full table, or for the
-mock baselines.)*
-
-The mock rows bound the achievable range. "Ignore condition" is handed perfect
-hearing and only its condition logic is broken — that's the ceiling for a model
-that hears perfectly but reasons badly. "First match only" is the TAG-Bench
-failure mode made executable.
-
-Code and docs are on GitHub, branch `compositional-temporal-grounding`.
-
----
-
 ## If you get these questions
 
 **"How do you know your composition matches your ground truth?"** — The oracle

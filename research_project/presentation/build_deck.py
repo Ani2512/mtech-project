@@ -435,22 +435,6 @@ rows = [["Novel here", "Not novel — cited, not claimed"],
 table(s, M, Inches(2.1), W - 2*M, rows, col_w=[5.9, 5.9], fs=12.5, row_h=Inches(1.15))
 n += 1
 
-# ---------------------------------------------------------------- 17 backup
-s = slide("Backup: full test-split results", "appendix")
-rows = [["f1@0.5", "PLAIN", "ORDINAL", "AFTER", "BEFORE", "NEXT_AFTER", "WHILE", "NOT_FOLL.", "ALL"],
-        ["A  direct", "0.276", "0.188", "0.220", "0.323", "0.101", "0.175", "0.146", "0.207"],
-        ["B  decompose", "0.295", "0.212", "0.234", "0.228", "0.159", "0.146", "0.215", "0.218"],
-        ["Vote-and-merge", "0.254", "0.079", "0.117", "0.330", "0.063", "0.100", "0.083", "0.150"],
-        ["mock: perfect", "1.000", "1.000", "1.000", "1.000", "1.000", "1.000", "1.000", "1.000"],
-        ["mock: ignore condition", "1.000", "0.497", "0.789", "0.722", "0.590", "0.749", "0.910", "0.764"],
-        ["mock: first match only", "0.758", "0.269", "0.260", "0.885", "0.370", "0.627", "0.590", "0.542"]]
-table(s, M, Inches(2.15), W - 2*M, rows, col_w=[2.6]+[1.15]*8, fs=11.5, head_fs=11, row_h=Inches(0.42))
-textbox(s, M, Inches(5.35), Inches(11.8), Inches(1.2),
-        ["Qwen2.5-Omni-7B, 4-bit, 699 held-out queries over composed ESC-50. Mock rows are scored on the full 4404-query benchmark and bound the achievable range: they are handed perfect grounding and have only their condition logic ablated.",
-         "Code and documentation: **github.com/Ani2512/mtech-project**, branch `compositional-temporal-grounding`."],
-        size=13, color=SEC, space=7)
-n += 1
-
 out = OUTDIR / "Compositional_Temporal_Audio_Grounding_2026-09-12.pptx"
 prs.save(str(out))
 print("saved:", out, "slides:", len(prs.slides.__iter__.__self__._sldIdLst))
