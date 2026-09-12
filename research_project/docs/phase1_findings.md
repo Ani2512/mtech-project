@@ -47,9 +47,26 @@ That alone caps IoU near 0.21 and guarantees 0 at the 0.5 threshold whatever
 the placement, so the two failures are confounded in the headline metric.
 This is why `centre_error_median` and `duration_ratio_median` were added.
 
-This reproduces TAG-Bench (arXiv 2609.01542), which reports Qwen2-Audio
-producing "syntactically complete time windows that suffer from severe
-semantic misalignment, resulting in zero overlap with the ground truth."
+This matches **SpotSound** (arXiv:2604.13023, §4.1 Qualitative Results),
+which reports on SpotSound-Bench that Qwen2-Audio "generates syntactically
+complete time windows that suffer from severe semantic misalignment,
+resulting in zero overlap with the ground truth."
+
+*(Corrected 2026-09-12: this quote was previously attributed to TAG-Bench.
+Qwen2-Audio is not evaluated in TAG-Bench at all — its 21 systems are Audio
+Flamingo 2/3, FireRedAudio, GLM-4-Voice, Kimi-Audio, MiDashengLM, MiMo-Audio,
+four MOSS-Audio variants, four Step-Audio-2 variants, Step-Audio-R1,
+LLaMA-Omni2-14B, LLaMA-3.1-8B-Omni, Gemini-3.1-Pro, LAT-Audio and TimeAudio.)*
+
+**Counter-evidence to weigh.** *From Semantics to Readout* (arXiv:2607.25355)
+measures Qwen2-Audio at **0.3653 mIoU zero-shot** on its grounding task, rising
+to 0.6199 after fine-tuning. That is not "cannot ground at all". The results are
+not directly comparable — different data, mIoU rather than f1@0.5 (which is
+all-or-nothing at the threshold), a different prompt, and 4-bit quantisation
+here — but the claim should be stated as *cannot ground on this benchmark under
+this prompt*, not as a property of the model. The independent support for the
+strong reading is local: predicted centres land within 1 s of a gold centre only
+38% of the time against 18% for random, and durations are ~5x too short.
 
 **Consequence: Qwen2-Audio is a negative reference, not a subject.** Phase 2
 cannot teach it to respect a condition when it cannot locate the sound.
@@ -113,20 +130,20 @@ on PLAIN (0.375 vs 0.094) is far too large to be noise.
 ## 6. Reproduction
 
 ```bash
-python -m dhwani.build_benchmark --source esc50 --n-clips 300 --p-overlap 0.45 \
+python -m ctag.build_benchmark --source esc50 --n-clips 300 --p-overlap 0.45 \
        --out data/esc50 --esc50-root data/esc50_raw
 for m in oracle ignore_condition first_only; do
-  python -m dhwani.run_zeroshot --model mock:$m --bench data/esc50/benchmark.jsonl \
+  python -m ctag.run_zeroshot --model mock:$m --bench data/esc50/benchmark.jsonl \
          --out runs/esc50/mock_$m
 done
-python -m dhwani.run_zeroshot --model qwen2.5-omni --bench data/esc50/benchmark.jsonl \
+python -m ctag.run_zeroshot --model qwen2.5-omni --bench data/esc50/benchmark.jsonl \
        --n 1200 --out runs/esc50/qwen25_omni
-python -m dhwani.run_zeroshot --model qwen2-audio --bench data/esc50/benchmark.jsonl \
+python -m ctag.run_zeroshot --model qwen2-audio --bench data/esc50/benchmark.jsonl \
        --n 1200 --out runs/esc50/qwen2_audio
 ```
 
 Rate on a T4 in 4-bit: 4.0–4.1 s per query for both models, so 1200 queries is
-roughly 80 minutes each. `dhwani.rescore <run_dir>` re-parses a finished run
+roughly 80 minutes each. `ctag.rescore <run_dir>` re-parses a finished run
 offline if the parser improves, so no run needs repeating for that reason.
 
 ## 7. Known gaps in this evidence

@@ -4,3 +4,6 @@ runs/
 *.zip
 __pycache__/
 .pytest_cache/
+
+# derived export of the deck; rebuild from the .pptx
+presentation/*.pdf
