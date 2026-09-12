@@ -354,10 +354,12 @@ big = s.shapes.add_textbox(M, Inches(2.2), Inches(5.4), Inches(1.5))
 p = big.text_frame.paragraphs[0]
 r = p.add_run(); r.text = "β = 2.37"
 r.font.size = Pt(62); r.font.bold = True; r.font.name = FONT; r.font.color.rgb = BLUE
-textbox(s, M, Inches(3.5), Inches(5.4), Inches(2.2),
-        ["from β² = 5.60, **read off the degradation slopes**, not tuned.",
+textbox(s, M, Inches(3.45), Inches(5.6), Inches(2.5),
+        ["β² = slope(miss) / slope(false alarm) = 1.411 / 0.252 = **5.60**",
+         "β = √5.60 = **2.37**  —  read off the curves, not tuned",
+         "F_β = (1 + β²) · P · R / (β² · P + R)",
          "Pinned by a unit test so it cannot quietly become a hyperparameter."],
-        size=15, space=10)
+        size=13.5, space=7)
 rows = [["Prediction against 3 gold intervals", "f1", "F-2.37"],
         ["misses one", "0.800", "0.702"],
         ["invents one", "0.857", "0.952"]]
