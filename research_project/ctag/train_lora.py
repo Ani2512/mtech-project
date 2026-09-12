@@ -147,9 +147,15 @@ def build_model(model_id: str, precision: str | None, lora_r: int, lora_alpha: i
         from .timetokens import TimeVocab
 
         vocab = TimeVocab(max_seconds, resolution)
-        base_vocab = model.get_input_embeddings().weight.shape[0]
+        # The base size is the TOKENIZER's length before the new tokens, not the
+        # embedding matrix's row count. Qwen pads the matrix (152,064 rows for a
+        # 151,665-token vocabulary), so reading the matrix gave a base larger
+        # than the resized matrix and the wrapper raised "no new rows".
+        base_vocab = len(processor.tokenizer)
         added = processor.tokenizer.add_tokens(vocab.tokens, special_tokens=False)
         model.resize_token_embeddings(len(processor.tokenizer))
+        assert model.get_input_embeddings().weight.shape[0] == base_vocab + added, \
+            "resize did not land at tokenizer length; new-row bookkeeping would be wrong"
         # TEMPO (arXiv:2608.29999): initialise each new embedding as the mean of
         # the BPE pieces of the number it stands for, so the tokens start where
         # the model already represents those digits rather than at random.
@@ -407,6 +413,13 @@ def main(argv=None):
         num_train_epochs=a.epochs,
         max_steps=a.max_steps,
         per_device_train_batch_size=a.batch_size,
+        # HF's per_device_eval_batch_size defaults to 8. The preflight covers a
+        # training batch of 1; an eval batch of 8 builds eight times the logits
+        # and is exactly where arm C died after 176 minutes of good training.
+        per_device_eval_batch_size=a.batch_size,
+        # Only the loss is needed from evaluation; gathering logits for the whole
+        # val set on the GPU is a second way to run out of memory.
+        prediction_loss_only=True,
         gradient_accumulation_steps=a.grad_accum,
         learning_rate=a.lr,
         lr_scheduler_type="cosine",
@@ -437,7 +450,28 @@ def main(argv=None):
     if a.preflight:
         _preflight(model, collate, train, a)
 
-    result = trainer.train()
+    from transformers import TrainerCallback
+
+    class SaveBeforeEval(TrainerCallback):
+        """The Trainer evaluates and only then saves at the end of an epoch. If
+        evaluation fails -- as it did with an out-of-memory in prediction_step
+        after 176 minutes of training -- the adapter is never written and the
+        whole epoch is lost. Save first."""
+        def on_epoch_end(self, args, state, control, model=None, **kw):
+            model.save_pretrained(a.out)
+            print(f"[train] adapter saved at end of epoch {state.epoch:.0f} -> {a.out}", flush=True)
+            return control
+
+    trainer.add_callback(SaveBeforeEval())
+
+    try:
+        result = trainer.train()
+    except Exception:
+        if trainer.state.global_step > 0:
+            model.save_pretrained(a.out)
+            print(f"[train] crashed after {trainer.state.global_step} steps; adapter saved to {a.out} "
+                  "so the training is not lost", flush=True)
+        raise
 
     # The averaged training_loss can look healthy while every step was skipped,
     # which is how a run with nan grad_norm and a loss of 0 reported PASSED.
