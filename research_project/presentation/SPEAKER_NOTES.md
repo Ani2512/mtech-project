@@ -120,7 +120,31 @@ long*. Five experimental arms from one codebase. Forty-six tests.
 
 ---
 
-## Slide 7 — Only one of the two candidate backbones can ground at all (1 min 30 s)
+## Slide 7 — Architecture, as it runs today (45 s)
+
+One picture of the whole system, three layers.
+
+Top row, **build**: ESC-50 clips go into the composer, which places them on a
+timeline — and because it placed them, it knows the exact boundaries. The query
+generator turns that timeline into eight kinds of question with exact answers,
+and the splitter divides clips into train, validation and test by a stable hash
+so nothing leaks.
+
+Middle row, **answer**: the five arms. All of them read the same benchmark file.
+The test split goes to every arm; the training split goes through `sft_data.py`
+into the two fine-tuning arms; the validation split is what the hybrid selects on.
+
+Bottom row, **score**: one metrics module scores every arm identically — IoU,
+Hungarian F1, count, rejection, centre error, and F-beta — into per-type tables.
+
+The green box on the left is the diagnostic: the oracle and the degraded
+grounders feed arm B's composition logic directly, on CPU. That's how the
+ceiling and the asymmetry were measured without a GPU.
+
+*(If asked "what's not on this diagram?")* Real recordings — everything here is
+composed audio. That's the months two-to-three work.
+
+## Slide 8 — Only one of the two candidate backbones can ground at all (1 min 30 s)
 
 Phase one: which open model can even attempt this? Two candidates, run zero-shot
 on a hundred and fifty queries each.
@@ -143,7 +167,7 @@ the sound — and then drops the qualifier attached to it.
 
 ---
 
-## Slide 8 — The hard part is not "conditions" — it is relating two events (1 min)
+## Slide 9 — The hard part is not "conditions" — it is relating two events (1 min)
 
 Look at *which* conditions fail. BEFORE and ORDINAL are handled — 0.38, 0.33.
 WHILE, AFTER, NOT_FOLLOWED, NEXT_AFTER collapse — all between 0.09 and 0.15.
@@ -159,7 +183,7 @@ down to one.
 
 ---
 
-## Slide 9 — Is the model bad at conditions, or bad at hearing? (2 min)
+## Slide 10 — Is the model bad at conditions, or bad at hearing? (2 min)
 
 This is the slide I'd most like you to take away.
 
@@ -188,7 +212,7 @@ first, decomposition is a free win on relational types, and tune for recall.
 
 ---
 
-## Slide 10 — Which produced a falsifiable prediction (45 s)
+## Slide 11 — Which produced a falsifiable prediction (45 s)
 
 Because the ceiling experiment gave per-type numbers, it made a prediction.
 Decomposition should *win* on the four types needing a second event — AFTER,
@@ -200,7 +224,7 @@ of it ran on a GPU. The next slide is the test.
 
 ---
 
-## Slide 11 — Tested on the real model: four of six predictions held (1 min 30 s)
+## Slide 12 — Tested on the real model: four of six predictions held (1 min 30 s)
 
 Held-out test split, six hundred and ninety-nine queries, the real model.
 
@@ -219,7 +243,7 @@ should exploit.
 
 ---
 
-## Slide 12 — Which grounding error actually costs us? (1 min 30 s)
+## Slide 13 — Which grounding error actually costs us? (1 min 30 s)
 
 If hearing is the bottleneck, the next question is: which *kind* of hearing
 error? A model can miss a sound that's there, or invent one that isn't.
@@ -241,7 +265,7 @@ questions reference other events. That's why nobody had measured it.
 
 ---
 
-## Slide 13 — So the objective is measured, not chosen (1 min)
+## Slide 14 — So the objective is measured, not chosen (1 min)
 
 F1 weights precision and recall equally. The data says that's wrong here. So
 use F-beta, with beta squared set to the measured asymmetry.
@@ -261,7 +285,7 @@ what they actually do downstream.
 
 ---
 
-## Slide 14 — A negative result: the decoder did not survive contact (1 min)
+## Slide 15 — A negative result: the decoder did not survive contact (1 min)
 
 I'm including this because it's the most instructive thing that happened.
 
@@ -280,7 +304,7 @@ decoder. But this mechanism is refuted, and I'm reporting it that way.
 
 ---
 
-## Slide 15 — Where it stands (1 min 30 s)
+## Slide 16 — Where it stands (1 min 30 s)
 
 Status as of this morning, honestly.
 
@@ -303,7 +327,7 @@ attempt died.
 
 ---
 
-## Slide 16 — What this evidence does not yet support (1 min)
+## Slide 17 — What this evidence does not yet support (1 min)
 
 Five things I don't want you to conclude from this.
 
@@ -323,7 +347,7 @@ beta rather than importing this number.
 
 ---
 
-## Slide 17 — Six-month plan (1 min)
+## Slide 18 — Six-month plan (1 min)
 
 Month one: finish phase two on composed audio, and put the benchmark and the
 diagnosis on arXiv early. TAG-Bench appeared on the second of September and is
@@ -346,7 +370,7 @@ extension, because it would generalise the claim beyond audio.
 
 ---
 
-## Slide 18 — Contributions, stated honestly (1 min)
+## Slide 19 — Contributions, stated honestly (1 min)
 
 Three things I'm claiming as new. The task and benchmark — interval-set answers
 to conditional queries over audio, with exact programmatic ground truth and

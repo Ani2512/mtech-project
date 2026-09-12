@@ -278,6 +278,14 @@ callout(s, Inches(7.0), Inches(5.55), Inches(5.55), Inches(0.72),
 n += 1
 
 # ---------------------------------------------------------------- 5 backbone
+# ---------------------------------------------------------------- architecture
+s = slide("Architecture, as it runs today", "system")
+picture(s, "fig5_architecture.png", Inches(1.8), height=Inches(4.55))
+callout(s, M, Inches(6.5), W - 2*M, Inches(0.55),
+        "Three layers. **Build** makes the audio and therefore knows the answer. **Answer** is five arms from one "
+        "codebase. **Score** is one metrics module, so every arm is measured the same way.", size=12.5)
+n += 1
+
 s = slide("Only one of the two candidate backbones can ground at all", "phase 1")
 picture(s, "fig1_backbone.png", Inches(2.0), height=Inches(3.7))
 textbox(s, M, Inches(5.95), Inches(11.8), Inches(1.1),
