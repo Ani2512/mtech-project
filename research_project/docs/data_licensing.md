@@ -15,3 +15,5 @@ Decision: phase 1 runs on the **composed ESC-50 track** (exact ground truth,
 Real-recording confirmation uses DESED and the TAG-Bench audio. The ESC-50
 non-commercial clause is fine for a thesis; an FSD50K bank is the swap if a
 CC BY release is wanted later.
+
+| Audio Flamingo 3 (`nvidia/audio-flamingo-3-hf`) | third backbone, arms A/B | NVIDIA OneWay Noncommercial + Qwen Research License | research use only; weights not redistributed |

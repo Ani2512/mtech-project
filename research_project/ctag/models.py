@@ -200,6 +200,55 @@ class Qwen2AudioBackend:
         return self.processor.batch_decode(ids, skip_special_tokens=True)[0].strip()
 
 
+def af3_conversation(audio_path: str, query_text: str, duration: float | None = None) -> list[dict]:
+    """Audio Flamingo 3's chat template takes one user turn with an audio part and a
+    text part. There is no separate system role in the published template, so the
+    system instruction is folded into the user text -- the same words the other
+    backends see, just in one message."""
+    return [{"role": "user", "content": [
+        {"type": "audio", "path": audio_path},
+        {"type": "text", "text": SYSTEM + "\n\n" + prompt_for(query_text, duration)},
+    ]}]
+
+
+class AudioFlamingo3Backend:
+    """NVIDIA Audio Flamingo 3 (arXiv:2507.08128): AF-Whisper encoder, MLP adaptor,
+    Qwen2.5-7B LLM. One of TAG-Bench's 21 evaluated systems, so scores here are
+    directly comparable to theirs. Audio longer than 30 s is processed in 30 s
+    windows; every clip in this benchmark is 20 s. Licence: NVIDIA OneWay
+    Noncommercial (plus the Qwen Research License) -- research use only.
+    """
+    name = "audio-flamingo-3"
+
+    def __init__(self, model_id="nvidia/audio-flamingo-3-hf", precision=None, max_new_tokens=96):
+        import torch
+        from transformers import AutoProcessor
+        try:
+            from transformers import AudioFlamingo3ForConditionalGeneration
+        except ImportError as e:  # pragma: no cover - runtime environment
+            raise ImportError(
+                "AudioFlamingo3ForConditionalGeneration is not in this transformers build; "
+                "the native integration is recent. Try: pip install -U transformers") from e
+
+        self.torch = torch
+        self.max_new_tokens = max_new_tokens
+        self.processor = AutoProcessor.from_pretrained(model_id)
+        label, kw = _fit_plan(8.4, precision)          # same footprint class as the Qwen models
+        print(f"[audio-flamingo-3] loading in {label}")
+        self.model = AudioFlamingo3ForConditionalGeneration.from_pretrained(model_id, **kw).eval()
+
+    def ground(self, audio_path, query_text, query=None, duration=None, temperature=None):
+        conv = af3_conversation(audio_path, query_text, duration)
+        inputs = self.processor.apply_chat_template(
+            conv, tokenize=True, add_generation_prompt=True, return_dict=True).to(self.model.device)
+        with self.torch.no_grad():
+            gen = ({"do_sample": True, "temperature": temperature} if temperature
+                   else {"do_sample": False})
+            ids = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens, **gen)
+        ids = ids[:, inputs["input_ids"].shape[1]:]
+        return self.processor.batch_decode(ids, skip_special_tokens=True)[0].strip()
+
+
 class GeminiBackend:
     name = "gemini"
 
@@ -225,4 +274,5 @@ def get_backend(name: str, **kw):
         return MockBackend(name.split(":", 1)[1])
     if name == "gemini":
         return GeminiBackend()
-    return {"qwen2.5-omni": Qwen25OmniBackend, "qwen2-audio": Qwen2AudioBackend}[name](**kw)
+    return {"qwen2.5-omni": Qwen25OmniBackend, "qwen2-audio": Qwen2AudioBackend,
+            "audio-flamingo-3": AudioFlamingo3Backend}[name](**kw)

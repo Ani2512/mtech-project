@@ -45,6 +45,7 @@ python -m ctag.build_benchmark --source esc50 --n-clips 300 --out data/esc50_ben
 python -m ctag.run_zeroshot --model qwen2.5-omni --bench data/esc50_bench/benchmark.jsonl --out runs/q25o
 python -m ctag.run_zeroshot --model qwen2-audio  --bench data/esc50_bench/benchmark.jsonl --out runs/q2a
 python -m ctag.run_zeroshot --model gemini       --bench data/esc50_bench/benchmark.jsonl --out runs/gemini   # needs GEMINI_API_KEY
+python -m ctag.run_zeroshot --model audio-flamingo-3 --bench data/esc50_bench/benchmark.jsonl --out runs/af3  # NVIDIA AF3, noncommercial licence
 ```
 
 Outputs per run: `predictions.jsonl` (query, raw model text, parsed intervals,

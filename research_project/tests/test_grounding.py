@@ -1030,3 +1030,24 @@ def test_hybrid_rejects_validation_runs_that_overlap_the_test_runs(tmp_path):
                      "--direct-val", str(tmp_path / "td"), "--agent-val", str(tmp_path / "ta"),
                      "--out", str(tmp_path / "out")])
     assert "validation and test" in str(e.value)
+
+
+
+def test_audio_flamingo_3_prompt_carries_the_same_instruction_as_the_other_backends():
+    """AF3's template has no system role, so the system text is folded into the
+    user turn. The words the model sees must be the ones every other backend
+    sees, or its score measures a different prompt."""
+    from ctag.models import SYSTEM, af3_conversation, get_backend, prompt_for
+
+    conv = af3_conversation("/tmp/clip.wav", "every dog bark after the siren", 20.0)
+    assert len(conv) == 1 and conv[0]["role"] == "user"
+    parts = conv[0]["content"]
+    assert parts[0] == {"type": "audio", "path": "/tmp/clip.wav"}
+    assert parts[1]["type"] == "text"
+    assert parts[1]["text"].startswith(SYSTEM)
+    assert parts[1]["text"].endswith(prompt_for("every dog bark after the siren", 20.0))
+
+    # registered under the name the runner uses; instantiating needs a GPU runtime
+    import inspect
+    src = inspect.getsource(get_backend)
+    assert '"audio-flamingo-3"' in src

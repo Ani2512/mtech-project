@@ -148,6 +148,20 @@ ok &= run(f"recall-biased decoding (k={K}, 2 votes)",
            "--temperature", "0.7"],
           "runs/esc50/test_union/summary.json")
 
+# --- optional extra backbones: arm A and arm B on the test split -------------
+# CTAG_EXTRA_MODELS="audio-flamingo-3" (comma-separated). Off by default so the
+# main pipeline's budget is unchanged; ~45 min per model for arm A, ~15 for B.
+for extra_model in [m for m in os.environ.get("CTAG_EXTRA_MODELS", "").split(",") if m.strip()]:
+    tag = extra_model.replace(".", "").replace("-", "")
+    ok &= run(f"arm A ({extra_model})",
+              ["ctag.run_zeroshot", "--model", extra_model, "--bench", TEST,
+               "--out", f"runs/esc50/test_direct_{tag}"],
+              f"runs/esc50/test_direct_{tag}/summary.json")
+    ok &= run(f"arm B ({extra_model})",
+              ["ctag.run_agent", "--grounder", extra_model, "--bench", TEST,
+               "--out", f"runs/esc50/test_agent_{tag}"],
+              f"runs/esc50/test_agent_{tag}/summary.json")
+
 # --- results ----------------------------------------------------------------
 import glob
 
