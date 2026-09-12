@@ -29,12 +29,17 @@ import time
 
 WORK = "/kaggle/working/mtech-project/research_project"
 TEST = "data/esc50/benchmark_test.jsonl"
+VAL = "data/esc50/benchmark_val.jsonl"
 os.environ.setdefault("HF_HOME", "/kaggle/temp/hf")
 os.chdir(WORK)
 
 EPOCHS = os.environ.get("CTAG_EPOCHS", "1")
 # Which mixed-precision setting the bootstrap found to actually train on this card.
 AMP = os.environ.get("CTAG_AMP", "none")
+# The hybrid selects per type on validation clips and reports on test clips.
+# Scoring the whole val split would cost another ~50 min; 400 queries is ~55 per
+# type, enough for six binary choices, and ctag.hybrid warns below 20.
+VAL_N = os.environ.get("CTAG_VAL_N", "400")
 print(f"[phase2] epochs={EPOCHS}  amp={AMP}")
 
 
@@ -72,9 +77,23 @@ ok &= run("arm B (decompose and combine)",
           ["ctag.run_agent", "--grounder", "qwen2.5-omni", "--bench", TEST,
            "--out", "runs/esc50/test_agent"],
           "runs/esc50/test_agent/summary.json")
+# The hybrid needs val-split scores to choose from. Without these the selection
+# set is empty and the hybrid silently becomes a copy of arm A, which is exactly
+# what happened on the first full run.
+ok &= run("arm A on val (for hybrid selection)",
+          ["ctag.run_zeroshot", "--model", "qwen2.5-omni", "--bench", VAL,
+           "--n", VAL_N, "--out", "runs/esc50/val_direct"],
+          "runs/esc50/val_direct/summary.json")
+ok &= run("arm B on val (for hybrid selection)",
+          ["ctag.run_agent", "--grounder", "qwen2.5-omni", "--bench", VAL,
+           "--n", VAL_N, "--out", "runs/esc50/val_agent"],
+          "runs/esc50/val_agent/summary.json")
 run("arm D (hybrid, selection on val)",
     ["ctag.hybrid", "--direct", "runs/esc50/test_direct",
-     "--agent", "runs/esc50/test_agent", "--out", "runs/esc50/test_hybrid"],
+     "--agent", "runs/esc50/test_agent",
+     "--direct-val", "runs/esc50/val_direct",
+     "--agent-val", "runs/esc50/val_agent",
+     "--out", "runs/esc50/test_hybrid"],
     "runs/esc50/test_hybrid/summary.json")
 
 # --- arm E: a reproduction of published work, so it yields if time runs short
@@ -104,7 +123,7 @@ import glob
 
 TYPES = ["PLAIN", "ORDINAL", "AFTER", "BEFORE", "NEXT_AFTER", "WHILE", "NOT_FOLLOWED", "ALL"]
 runs = {}
-for p in sorted(glob.glob("runs/esc50/test_*/summary.json")):
+for p in sorted(glob.glob("runs/esc50/test_*/summary.json")):  # val_* are selection only, not arms
     name = os.path.basename(os.path.dirname(p)).replace("test_", "")
     runs[name] = json.load(open(p))["by_type"]
 

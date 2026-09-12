@@ -62,10 +62,16 @@ class GroundingCollator:
     immune to however the processor expands the prompt.
     """
 
-    def __init__(self, processor, sr: int = 16000, max_audio_s: float = 30.0):
+    def __init__(self, processor, sr: int = 16000, max_audio_s: float = 30.0,
+                 max_seq_len: int | None = 3072):
         self.p = processor
         self.sr = sr
         self.max_audio_s = max_audio_s
+        # The lm_head produces one logit per vocabulary entry per position:
+        # 152,064 x 4,096 positions is 1.2 GiB in fp16, and the backward pass
+        # needs the gradient and an fp32 softmax on top. That single tensor is
+        # what raised "tried to allocate 3.07 GiB" on a T4, not the weights.
+        self.max_seq_len = max_seq_len
 
     def __call__(self, batch: list[dict]):
         import librosa
@@ -91,6 +97,17 @@ class GroundingCollator:
 
         enc = self.p(text=texts, audio=audios, sampling_rate=self.sr,
                      return_tensors="pt", padding=True)
+        full_len = enc["input_ids"].shape[1]
+        if self.max_seq_len and full_len > self.max_seq_len:
+            # Keep the tail: the answer is at the end, and truncating the front
+            # drops leading audio rather than the supervision signal. Measure
+            # against the original length -- comparing against input_ids while
+            # rewriting it leaves every later tensor at full width, and the
+            # answer then falls outside the mask entirely.
+            keep = self.max_seq_len
+            for k, v in list(enc.items()):
+                if hasattr(v, "shape") and getattr(v, "ndim", 0) >= 2 and v.shape[1] == full_len:
+                    enc[k] = v[:, -keep:]
         input_ids = enc["input_ids"]
         labels = torch.full_like(input_ids, -100)
 
@@ -130,6 +147,7 @@ def build_model(model_id: str, precision: str | None, lora_r: int, lora_alpha: i
         from .timetokens import TimeVocab
 
         vocab = TimeVocab(max_seconds, resolution)
+        base_vocab = model.get_input_embeddings().weight.shape[0]
         added = processor.tokenizer.add_tokens(vocab.tokens, special_tokens=False)
         model.resize_token_embeddings(len(processor.tokenizer))
         # TEMPO (arXiv:2608.29999): initialise each new embedding as the mean of
@@ -150,12 +168,32 @@ def build_model(model_id: str, precision: str | None, lora_r: int, lora_alpha: i
         # fastest way to overfit the composed-audio distribution.
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                         "gate_proj", "up_proj", "down_proj"],
-        # New timestamp embeddings are not low-rank updates to existing weights;
-        # they are new rows and must be trained in full, or they stay at their
-        # initialisation and the whole scheme is inert.
-        modules_to_save=(["embed_tokens", "lm_head"] if time_tokens else None),
+        # Not modules_to_save=["embed_tokens", "lm_head"]: that makes both full
+        # 152,064 x 3,584 matrices trainable, about 16 GiB of weights, gradients
+        # and Adam state, which is why arm E died on a T4 inside a minute. The
+        # new rows are still trained in full, but only the new rows -- see
+        # timetokens.wrap_new_rows.
+        modules_to_save=None,
     )
+    if time_tokens:
+        from .timetokens import wrap_new_rows
+
+        wrap_new_rows(model, base_vocab)
+
     model = get_peft_model(model, cfg)
+
+    if time_tokens:
+        # get_peft_model freezes everything it does not own, the deltas included.
+        n_delta = 0
+        for name, param in model.named_parameters():
+            if name.endswith(".delta"):
+                param.requires_grad_(True)
+                n_delta += param.numel()
+        if not n_delta:
+            raise RuntimeError("timestamp deltas were not registered; they would "
+                               "stay at initialisation and the scheme would be inert")
+        print(f"[train] {n_delta:,} trainable timestamp parameters "
+              f"({n_delta * 4 / 1024 ** 2:.1f} MB), base embeddings frozen")
 
     # Keep every trainable tensor in fp32. With 4-bit weights and an fp16
     # compute dtype the adapter updates underflow and the optimiser state
@@ -247,6 +285,51 @@ def _make_time_trainer():
     return TimeAwareTrainer
 
 
+def _preflight(model, collate, examples, a):
+    """One forward+backward on the longest example, before the real run.
+
+    The first full attempt spent 159 minutes training arm C and then died in the
+    backward pass with CUDA out of memory. The longest example is the one that
+    will fail, so try it first: a failure here costs about a minute and says what
+    to change.
+    """
+    import torch
+
+    longest = max(examples, key=lambda e: len(e.get("target", "")) +
+                  sum(len(m.get("content", "")) for m in e["messages"]))
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+    try:
+        batch = collate([longest] * max(1, a.batch_size))
+        batch = {k: (v.to(model.device) if hasattr(v, "to") else v) for k, v in batch.items()}
+        model.train()
+        out = model(**batch)
+        out.loss.backward()
+        model.zero_grad(set_to_none=True)
+    except torch.cuda.OutOfMemoryError as e:
+        free = total = 0
+        if torch.cuda.is_available():
+            free, total = (x / 1024 ** 3 for x in torch.cuda.mem_get_info())
+        raise SystemExit(
+            f"\n*** PREFLIGHT OOM -- stopping now rather than after hours of training.\n"
+            f"{e}\n"
+            f"GPU has {free:.1f} GiB free of {total:.1f} GiB. Sequence length was "
+            f"{batch['input_ids'].shape[1] if 'batch' in dir() else 'unknown'} tokens.\n"
+            f"Try, in order:  --max-seq-len {max(512, (a.max_seq_len or 3072) // 2)}  "
+            f"|  --max-seconds {a.max_seconds / 2:.0f}  |  --grad-accum {a.grad_accum * 2} "
+            f"with --batch-size 1  |  --lora-r {max(8, a.lora_r // 2)}\n") from None
+    finally:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        peak = torch.cuda.max_memory_allocated() / 1024 ** 3
+        _, total = (x / 1024 ** 3 for x in torch.cuda.mem_get_info())
+        print(f"[train] preflight OK: peak {peak:.1f} GiB of {total:.1f} GiB "
+              f"on the longest example ({batch['input_ids'].shape[1]} tokens)")
+    else:
+        print(f"[train] preflight OK on CPU ({batch['input_ids'].shape[1]} tokens)")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True)
@@ -269,6 +352,16 @@ def main(argv=None):
     ap.add_argument("--time-tokens", action="store_true",
                     help="atomic timestamp tokens plus the distance-aware Gaussian loss")
     ap.add_argument("--max-seconds", type=float, default=30.0)
+    ap.add_argument("--max-seq-len", type=int, default=3072,
+                    help="cap on tokens per example; bounds the lm_head logits, "
+                         "which is the allocation that OOMs on a 15 GB card. 0 disables.")
+    ap.add_argument("--optim", default=None,
+                    help="optimiser; defaults to paged_adamw_8bit when bitsandbytes "
+                         "is available (a quarter of the Adam state), else adamw_torch")
+    ap.add_argument("--preflight", action="store_true", default=True,
+                    help="run one forward+backward on the longest example first and "
+                         "report peak memory, so an OOM costs seconds not hours")
+    ap.add_argument("--no-preflight", dest="preflight", action="store_false")
     ap.add_argument("--resolution", type=float, default=0.1)
     ap.add_argument("--time-sigma", type=float, default=0.3,
                     help="TEMPO uses 0.3 s")
@@ -297,7 +390,17 @@ def main(argv=None):
     model, processor, vocab = build_model(a.model_id, a.precision, a.lora_r, a.lora_alpha,
                                           a.lora_dropout, a.time_tokens, a.max_seconds,
                                           a.resolution)
-    collate = GroundingCollator(processor)
+    collate = GroundingCollator(processor, max_seq_len=(a.max_seq_len or None))
+
+    optim = a.optim
+    if optim is None:
+        try:
+            import bitsandbytes  # noqa: F401
+            optim = "paged_adamw_8bit"
+        except Exception:
+            optim = "adamw_torch"
+    print(f"[train] optimiser: {optim}"
+          + ("  (8-bit state: a quarter of fp32 Adam)" if "8bit" in optim else ""))
 
     args = TrainingArguments(
         output_dir=a.out,
@@ -316,6 +419,10 @@ def main(argv=None):
         # QLoRA produce nan gradients.
         bf16=bf16, fp16=fp16,
         gradient_checkpointing=True,
+        # PEFT wraps modules the reentrant checkpointer cannot see through, which
+        # silently drops gradients for the wrapped embeddings.
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        optim=optim,
         report_to=[],
         remove_unused_columns=False,
         dataloader_num_workers=2,
@@ -327,11 +434,19 @@ def main(argv=None):
     else:
         trainer = Trainer(model=model, args=args, train_dataset=train, eval_dataset=val,
                           data_collator=collate)
+    if a.preflight:
+        _preflight(model, collate, train, a)
+
     result = trainer.train()
 
     # The averaged training_loss can look healthy while every step was skipped,
     # which is how a run with nan grad_norm and a loss of 0 reported PASSED.
     # Inspect the logged history instead.
+    if a.time_tokens:
+        from .timetokens import save_deltas
+
+        save_deltas(model, a.out)
+
     history = [h for h in trainer.state.log_history if "grad_norm" in h or "loss" in h]
     nan_grads = sum(1 for h in history
                     if isinstance(h.get("grad_norm"), float) and h["grad_norm"] != h["grad_norm"])

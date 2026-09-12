@@ -66,10 +66,29 @@ Quantisation rounds half **up** with a 1e-6 tolerance rather than using
 near midpoints. The residual error is at most 0.05 s, far below anything the
 IoU metric resolves on ~2.5 s events.
 
-The new embeddings are trained in full via LoRA's `modules_to_save`
-(`embed_tokens`, `lm_head`). They are new rows, not low-rank updates to existing
-weights, so a plain adapter would leave them at initialisation and the scheme
-would be inert.
+The new embeddings are new rows, not low-rank updates to existing weights, so a
+plain adapter would leave them at initialisation and the scheme would be inert.
+They must genuinely train.
+
+The obvious way to do that, LoRA's `modules_to_save=["embed_tokens", "lm_head"]`,
+does not fit on the hardware. It unfreezes both matrices in full: for
+Qwen2.5-Omni that is 152,064 x 3,584 twice, about 2.0 GB of fp32 weights, 2.0 GB
+of gradients and 4.1 GB of Adam state each — roughly **16 GB before a single
+activation**. On a 15 GB T4 the backward pass died in under a minute, which is
+exactly how arm E failed on 2026-09-11.
+
+Only the 301 timestamp rows need to move, about 4 MB. `timetokens.wrap_new_rows`
+keeps both base matrices frozen and puts a small trainable delta on the tail: the
+input embedding is `base(ids) + delta[ids - base_size]` for the new ids, so
+TEMPO's mean-of-BPE initialisation is preserved and learned on top of, and the
+output head supplies the new-token logits from the delta alone, with the base
+rows zeroed so nothing has to fight a random initialisation. Same computation,
+about 1/500th of the optimiser cost.
+
+PEFT does not know about those deltas, so they are written beside the adapter as
+`time_deltas.pt` and re-applied at load time. If that file is missing, the
+backend says so loudly rather than silently scoring a model whose timestamp
+tokens never moved.
 
 ## Running it
 

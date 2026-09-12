@@ -99,3 +99,29 @@ Each of these is a real outcome. None requires the method to work.
 3. `train_lora` has never been executed; it is written against the documented
    API but the first GPU run should be a 20-step smoke test with `--max-steps 20`
    before committing to a full epoch.
+
+## Memory, after the 2026-09-11 failure
+
+The first unattended run completed the inference arms and lost both training
+arms to CUDA out-of-memory on a 15 GB T4. Arm C burned 159 minutes before dying;
+arm E died in one. Three causes, all now addressed:
+
+1. **The logits, not the weights.** The failing allocation was 3.07 GiB, which is
+   one `lm_head` output: 152,064 vocabulary entries by ~3,600 positions in fp16,
+   plus its gradient and an fp32 softmax. `--max-seq-len` (default 3072) bounds
+   it. Truncation keeps the tail, because the supervised answer is at the end.
+2. **`modules_to_save` for arm E**, about 16 GB of weights, gradients and Adam
+   state to move 301 rows. Replaced by a trainable delta on the new rows only —
+   see `docs/timestamp_tokens.md`.
+3. **fp32 Adam state.** `--optim` now defaults to `paged_adamw_8bit` when
+   bitsandbytes is importable, a quarter of the optimiser memory.
+
+And so the next failure is cheap rather than expensive, `--preflight` (on by
+default) runs one forward and backward on the longest example before training
+starts, prints peak memory against the card's capacity, and on OOM exits in about
+a minute naming the flags to try. Two and a half hours of T4 time were spent
+discovering this the other way.
+
+**Not yet verified on a GPU.** All of the above is tested on CPU — the wrappers,
+the truncation, the save/load round trip — but no fine-tuning arm has run on real
+hardware yet. The preflight is what makes the first GPU minute informative.

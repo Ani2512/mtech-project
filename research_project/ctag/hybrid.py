@@ -10,7 +10,15 @@ if the choice is made on validation clips and reported on test clips. Selecting
 on the test set and reporting the same numbers would be choosing the maximum of
 two noisy estimates and calling it a method.
 
-    python -m ctag.hybrid --direct runs/esc50/qwen25_omni --agent runs/esc50/agent_omni \
+Selection needs validation queries. When --direct/--agent hold only test-split
+queries -- which is what happens if the arms were scored on benchmark_test.jsonl
+-- there is nothing to select on, and an earlier version silently fell back to
+"direct" for every type, making the hybrid a byte-identical copy of arm A. Pass
+the val-split runs explicitly, or let the split be derived from runs that span
+both; either way an empty validation set is now an error, not a default.
+
+    python -m ctag.hybrid --direct runs/esc50/test_direct --agent runs/esc50/test_agent \
+           --direct-val runs/esc50/val_direct --agent-val runs/esc50/val_agent \
            --out runs/esc50/hybrid
 """
 from __future__ import annotations
@@ -38,8 +46,10 @@ def clip_of(qid: str) -> str:
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--direct", required=True, help="run dir for direct prompting")
-    ap.add_argument("--agent", required=True, help="run dir for decompose-and-combine")
+    ap.add_argument("--direct", required=True, help="run dir for direct prompting (test)")
+    ap.add_argument("--agent", required=True, help="run dir for decompose-and-combine (test)")
+    ap.add_argument("--direct-val", help="run dir for direct prompting on the val split")
+    ap.add_argument("--agent-val", help="run dir for the agent on the val split")
     ap.add_argument("--out", required=True)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--frac-train", type=float, default=0.7)
@@ -59,14 +69,40 @@ def main(argv=None):
         n_split[s] += 1
     print("queries per split:", dict(n_split))
 
-    # choose on val only
+    # choose on val only -- either from dedicated val runs, or from the val
+    # portion of the runs we were given
+    if bool(a.direct_val) != bool(a.agent_val):
+        raise SystemExit("pass both --direct-val and --agent-val, or neither")
+    if a.direct_val:
+        dv, gv = load(Path(a.direct_val)), load(Path(a.agent_val))
+        val_shared = sorted(set(dv) & set(gv))
+        if not val_shared:
+            raise SystemExit("the two validation runs share no query ids")
+        leak = set(val_shared) & set(shared)
+        if leak:
+            raise SystemExit(
+                f"{len(leak)} query ids appear in both the validation and test runs, "
+                "e.g. " + ", ".join(sorted(leak)[:3])
+                + ". Selecting on queries that are also reported would be choosing "
+                  "the maximum of two noisy estimates and calling it a method.")
+        print(f"{len(val_shared)} validation queries from --direct-val/--agent-val")
+    else:
+        dv, gv = direct, agent
+        val_shared = [q for q in shared if split_of[q] == "val"]
+
     val_scores: dict[str, dict[str, list]] = defaultdict(lambda: {"direct": [], "agent": []})
-    for q in shared:
-        if split_of[q] != "val":
-            continue
-        t = direct[q]["qtype"]
-        val_scores[t]["direct"].append(direct[q][a.metric])
-        val_scores[t]["agent"].append(agent[q][a.metric])
+    for q in val_shared:
+        t = dv[q]["qtype"]
+        val_scores[t]["direct"].append(dv[q][a.metric])
+        val_scores[t]["agent"].append(gv[q][a.metric])
+
+    if not val_scores:
+        raise SystemExit(
+            "no validation queries, so there is nothing to select on -- the hybrid "
+            "would just be a copy of arm A.\n"
+            f"The runs given hold only: {dict(n_split)}.\n"
+            "Score both arms on data/esc50/benchmark_val.jsonl and pass them as "
+            "--direct-val/--agent-val.")
 
     choice = {}
     print(f"\narm chosen per type, on VAL ({a.metric})")
@@ -77,6 +113,11 @@ def main(argv=None):
         mg = sum(g) / len(g) if g else 0.0
         choice[t] = "agent" if mg > md else "direct"
         print(f"{t:<14}{md:>10.3f}{mg:>10.3f}{len(d):>6}  {choice[t]}")
+
+    thin = [t for t in val_scores if len(val_scores[t]["direct"]) < 20]
+    if thin:
+        print(f"[warn] fewer than 20 validation queries for: {', '.join(sorted(thin))} "
+              "-- those per-type choices are close to a coin flip")
 
     # report on test only
     rows_hybrid, rows_direct, rows_agent = [], [], []
@@ -99,6 +140,10 @@ def main(argv=None):
         {"model": "hybrid", "choice": choice, "n_test": len(rows_hybrid),
          "by_type": summaries["hybrid"], "arms": {k: v for k, v in summaries.items() if k != "hybrid"}},
         indent=2), encoding="utf-8")
+
+    if all(v == "direct" for v in choice.values()):
+        print("\n[warn] validation picked 'direct' for every type, so the hybrid is "
+              "identical to arm A by choice, not by accident")
 
     TY = ["PLAIN", "ORDINAL", "AFTER", "BEFORE", "NEXT_AFTER", "WHILE", "NOT_FOLLOWED", "ALL"]
     print(f"\nTEST split, {len(rows_hybrid)} queries ({a.metric})")

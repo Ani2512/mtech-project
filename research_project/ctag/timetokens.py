@@ -148,3 +148,144 @@ class TimeVocab:
                 embedding_matrix[tid] = embedding_matrix[pieces].mean(dim=0)
                 n += 1
         return n
+
+
+# ---------------------------------------------------------------------------
+# Training only the rows that are new
+# ---------------------------------------------------------------------------
+#
+# PEFT's modules_to_save=["embed_tokens", "lm_head"] makes the *whole* of both
+# matrices trainable. For Qwen2.5-Omni that is 152,064 x 3,584 twice: about
+# 2.0 GiB of fp32 weights, 2.0 GiB of gradients and 4.1 GiB of Adam state per
+# matrix, so roughly 16 GiB before a single activation. On a 15 GiB T4 the
+# backward pass died in under a minute.
+#
+# Only the timestamp rows need to move -- 301 of them at a 0.1 s resolution,
+# about 4 MB. These two wrappers keep the base matrices frozen and put a small
+# trainable delta on the tail, which is the same computation at 1/4000th of the
+# optimiser cost.
+
+
+def _new_rows_modules():
+    """Imported lazily: torch is a GPU-runtime dependency, not a package one."""
+    import torch
+    import torch.nn.functional as F
+    from torch import nn
+
+    class NewRowsEmbedding(nn.Module):
+        """Frozen base embedding, plus a trainable delta on rows >= base_size.
+
+        The base rows already hold TEMPO's mean-of-BPE initialisation, so the
+        delta starts at zero and learns on top of it rather than replacing it.
+        """
+
+        def __init__(self, base: nn.Embedding, base_size: int):
+            super().__init__()
+            self.base = base
+            self.base_size = int(base_size)
+            n_new = base.num_embeddings - self.base_size
+            if n_new <= 0:
+                raise ValueError(f"no new rows: {base.num_embeddings} <= {base_size}")
+            self.delta = nn.Parameter(
+                torch.zeros(n_new, base.embedding_dim, dtype=torch.float32))
+            for p in self.base.parameters():
+                p.requires_grad_(False)
+
+        @property
+        def weight(self):                     # some callers read .weight directly
+            return self.base.weight
+
+        def forward(self, ids):
+            out = self.base(ids)
+            is_new = ids >= self.base_size
+            idx = (ids - self.base_size).clamp_(min=0)
+            add = self.delta.to(out.dtype)[idx]
+            return out + add * is_new.unsqueeze(-1).to(out.dtype)
+
+    class NewRowsLinear(nn.Module):
+        """Frozen base projection, with the tail logits supplied by a trainable
+        delta. The base rows for the new tokens are zeroed at construction, so
+        the new-token logits are learned rather than fighting a random init."""
+
+        def __init__(self, base: nn.Linear, base_size: int):
+            super().__init__()
+            self.base = base
+            self.base_size = int(base_size)
+            n_new = base.out_features - self.base_size
+            if n_new <= 0:
+                raise ValueError(f"no new rows: {base.out_features} <= {base_size}")
+            with torch.no_grad():
+                base.weight[self.base_size:].zero_()
+                if base.bias is not None:
+                    base.bias[self.base_size:].zero_()
+            self.delta = nn.Parameter(
+                torch.zeros(n_new, base.in_features, dtype=torch.float32))
+            for p in self.base.parameters():
+                p.requires_grad_(False)
+
+        def forward(self, x):
+            logits = self.base(x)
+            tail = F.linear(x, self.delta.to(x.dtype))
+            return torch.cat([logits[..., :self.base_size],
+                              logits[..., self.base_size:] + tail], dim=-1)
+
+    return NewRowsEmbedding, NewRowsLinear
+
+
+DELTA_FILE = "time_deltas.pt"
+
+
+def wrap_new_rows(thinker, base_size: int):
+    """Swap in the trainable-tail wrappers. Returns the two new modules."""
+    NewRowsEmbedding, NewRowsLinear = _new_rows_modules()
+    emb = thinker.get_input_embeddings()
+    head = thinker.get_output_embeddings()
+    if head is None:
+        raise RuntimeError("no output embedding to wrap; cannot train timestamp tokens")
+    wrapped_emb = NewRowsEmbedding(emb, base_size)
+    wrapped_head = NewRowsLinear(head, base_size)
+    thinker.set_input_embeddings(wrapped_emb)
+    thinker.set_output_embeddings(wrapped_head)
+    return wrapped_emb, wrapped_head
+
+
+def save_deltas(model, out_dir):
+    """Write the timestamp deltas next to the adapter. PEFT does not know about
+    them, so without this the tokens stay at their initialisation and the whole
+    scheme is inert -- the same failure modules_to_save was there to prevent."""
+    import os
+
+    import torch
+
+    found = {}
+    for name, mod in model.named_modules():
+        if hasattr(mod, "delta") and hasattr(mod, "base_size"):
+            key = "embedding" if "embed" in name.lower() else "lm_head"
+            found[key] = {"delta": mod.delta.detach().cpu(), "base_size": mod.base_size}
+    if not found:
+        return None
+    path = os.path.join(out_dir, DELTA_FILE)
+    torch.save(found, path)
+    print(f"[train] saved timestamp deltas for {sorted(found)} -> {path}")
+    return path
+
+
+def load_deltas(thinker, adapter_dir):
+    """Re-apply saved deltas at inference. Returns True when they were found."""
+    import os
+
+    import torch
+
+    path = os.path.join(adapter_dir, DELTA_FILE)
+    if not os.path.exists(path):
+        return False
+    blob = torch.load(path, map_location="cpu")
+    base_size = next(iter(blob.values()))["base_size"]
+    emb, head = wrap_new_rows(thinker, base_size)
+    with torch.no_grad():
+        if "embedding" in blob:
+            emb.delta.copy_(blob["embedding"]["delta"].to(emb.delta.dtype))
+        if "lm_head" in blob:
+            head.delta.copy_(blob["lm_head"]["delta"].to(head.delta.dtype))
+    print(f"[qwen2.5-omni] loaded timestamp deltas from {path}")
+    return True

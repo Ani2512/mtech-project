@@ -116,10 +116,24 @@ class Qwen25OmniBackend:
             n_tok = len(self.processor.tokenizer)
             cur = self.model.thinker.get_input_embeddings().weight.shape[0]
             if n_tok != cur:
-                # modules_to_save stored full embed_tokens/lm_head at the trained
-                # size; the base model must match before the adapter attaches.
+                # The tokenizer carries the timestamp tokens; the base model must
+                # match that size before anything is attached.
                 print(f"[qwen2.5-omni] resizing embeddings {cur} -> {n_tok} for the adapter")
                 self.model.thinker.resize_token_embeddings(n_tok)
+
+            # Timestamp tokens are trained as a small delta on the new rows only
+            # (see timetokens.wrap_new_rows), so they live beside the adapter
+            # rather than inside it. Without this they stay at initialisation and
+            # arm E silently measures nothing.
+            from .timetokens import load_deltas
+
+            had_deltas = load_deltas(self.model.thinker, adapter)
+            if n_tok != cur and not had_deltas:
+                print("[qwen2.5-omni] WARNING: the tokenizer has timestamp tokens but "
+                      "no time_deltas.pt was found next to the adapter; the new "
+                      "embeddings are at their initialisation and predictions "
+                      "using them are meaningless")
+
             # train_lora tunes the thinker, so the adapter attaches there, not to
             # the top-level wrapper whose module names it would not match.
             self.model.thinker = PeftModel.from_pretrained(self.model.thinker, adapter).eval()

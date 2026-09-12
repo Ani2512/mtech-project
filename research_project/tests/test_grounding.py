@@ -802,3 +802,231 @@ def test_bf16_is_rejected_when_only_emulated():
             sys.modules["torch"] = real
         else:
             sys.modules.pop("torch", None)
+
+
+# ---------------------------------------------------------------------------
+# Memory fixes: only the new rows train, and long sequences are bounded
+# ---------------------------------------------------------------------------
+
+
+def test_new_rows_train_without_unfreezing_the_whole_vocabulary():
+    """modules_to_save=["embed_tokens", "lm_head"] makes both full 152k x 3584
+    matrices trainable -- about 16 GB of weights, gradients and Adam state, which
+    is why arm E died on a T4 in under a minute. Only the timestamp rows need to
+    move."""
+    import torch
+    from torch import nn
+
+    from ctag.timetokens import _new_rows_modules
+
+    NewRowsEmbedding, NewRowsLinear = _new_rows_modules()
+    v_old, n_new, h = 64, 5, 8
+
+    base = nn.Embedding(v_old + n_new, h)
+    nn.init.normal_(base.weight, std=1.0)
+    before = base.weight.data.clone()
+    emb = NewRowsEmbedding(base, v_old)
+
+    ids = torch.tensor([[7, v_old + 1, v_old + 4]])
+    out = emb(ids)
+    assert torch.allclose(out[0, 0], before[7])
+    # the delta starts at zero, so TEMPO's mean-of-BPE initialisation is kept
+    assert torch.allclose(out[0, 1], before[v_old + 1])
+
+    emb(ids).pow(2).sum().backward()
+    assert base.weight.grad is None, "base embedding must stay frozen"
+    touched = (emb.delta.grad.abs().sum(-1) > 0).nonzero().flatten().tolist()
+    assert touched == [1, 4], f"only the ids actually used should move, got {touched}"
+
+    head_base = nn.Linear(h, v_old + n_new, bias=False)
+    nn.init.normal_(head_base.weight, std=1.0)
+    kept = head_base.weight.data[:v_old].clone()
+    head = NewRowsLinear(head_base, v_old)
+    x = torch.randn(2, 3, h)
+    logits = head(x)
+    assert logits.shape == (2, 3, v_old + n_new)
+    assert torch.allclose(logits[..., :v_old], x @ kept.T, atol=1e-5)
+    # new-token logits are learned from zero rather than fighting a random init
+    assert torch.allclose(logits[..., v_old:], torch.zeros(2, 3, n_new), atol=1e-6)
+    logits.sum().backward()
+    assert head_base.weight.grad is None, "base head must stay frozen"
+
+    trainable = sum(p.numel() for p in [*emb.parameters(), *head.parameters()]
+                    if p.requires_grad)
+    assert trainable == 2 * n_new * h
+    assert trainable < 2 * (v_old + n_new) * h
+
+
+def test_timestamp_deltas_survive_a_save_and_load(tmp_path):
+    """PEFT does not know about the deltas, so if they are not written beside the
+    adapter the timestamp tokens stay at initialisation and arm E measures
+    nothing -- the exact failure modules_to_save was there to prevent."""
+    import torch
+    from torch import nn
+
+    from ctag.timetokens import DELTA_FILE, load_deltas, save_deltas, wrap_new_rows
+
+    v_old, n_new, h = 32, 4, 6
+
+    class Tiny(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed_tokens = nn.Embedding(v_old + n_new, h)
+            self.lm_head = nn.Linear(h, v_old + n_new, bias=False)
+
+        def get_input_embeddings(self):
+            return self.embed_tokens
+
+        def set_input_embeddings(self, m):
+            self.embed_tokens = m
+
+        def get_output_embeddings(self):
+            return self.lm_head
+
+        def set_output_embeddings(self, m):
+            self.lm_head = m
+
+    trained = Tiny()
+    emb, head = wrap_new_rows(trained, v_old)
+    with torch.no_grad():
+        emb.delta.normal_()
+        head.delta.normal_()
+    assert save_deltas(trained, str(tmp_path)) is not None
+    assert (tmp_path / DELTA_FILE).exists()
+
+    fresh = Tiny()
+    fresh.embed_tokens.weight.data = trained.embed_tokens.base.weight.data.clone()
+    fresh.lm_head.weight.data = trained.lm_head.base.weight.data.clone()
+    assert load_deltas(fresh, str(tmp_path)) is True
+    ids = torch.tensor([[3, v_old + 2]])
+    assert torch.allclose(fresh.embed_tokens(ids), trained.embed_tokens(ids), atol=1e-6)
+    x = torch.randn(1, 2, h)
+    assert torch.allclose(fresh.lm_head(x), trained.lm_head(x), atol=1e-5)
+
+    # an adapter dir with no deltas must be reported, not silently accepted
+    assert load_deltas(Tiny(), str(tmp_path / "empty")) is False
+
+
+def test_collator_caps_sequence_length_but_keeps_the_answer(tmp_path):
+    """One logit per vocabulary entry per position is what OOMs: 152k x 4096 is
+    1.2 GB in fp16 before the gradient. Truncation has to take the front, because
+    the supervised answer is at the end."""
+    import numpy as np
+    import soundfile as sf
+
+    from ctag.train_lora import GroundingCollator
+
+    wav = tmp_path / "c.wav"
+    sf.write(wav, np.zeros(16000, dtype="float32"), 16000)
+
+    ex = {"audio": str(wav),
+          "messages": [{"role": "user", "content": "Locate: every dog"}],
+          "target": "A B"}
+
+    uncapped = GroundingCollator(_stub_processor(400, 2), max_seq_len=None)([ex])
+    full_len = uncapped["input_ids"].shape[1]
+    assert full_len > 64
+
+    capped = GroundingCollator(_stub_processor(400, 2), max_seq_len=64)([ex])
+    assert capped["input_ids"].shape[1] == 64
+    assert capped["labels"].shape == capped["input_ids"].shape
+    kept = (capped["labels"][0] != -100).nonzero().flatten().tolist()
+    end = int(capped["attention_mask"][0].sum())
+    assert kept == [end - 2, end - 1], f"answer must survive truncation, got {kept}"
+
+
+# ---------------------------------------------------------------------------
+# The hybrid must select on validation clips, or say why it cannot
+# ---------------------------------------------------------------------------
+
+
+def _write_run(dirpath, clips, qtypes, score_for):
+    """A minimal predictions.jsonl that summarize() will accept."""
+    import json
+
+    dirpath.mkdir(parents=True, exist_ok=True)
+    with open(dirpath / "predictions.jsonl", "w", encoding="utf-8") as f:
+        for c in clips:
+            for j, t in enumerate(qtypes):
+                s = score_for(t)
+                f.write(json.dumps({
+                    "qid": f"{c}_q{j}", "qtype": t, "expects_empty": False,
+                    "pred_empty": False, "parse_fail": 0, "n_pred": 1, "n_gt": 1,
+                    "union_iou": s, "f1@0.5": s, "f1@0.7": s, "f_beta": s,
+                    "count_acc": 1, "centre_errors": [],
+                }) + "\n")
+
+
+def _clips_by_split(n=400, seed=0):
+    from collections import defaultdict
+
+    from ctag.split import assign
+
+    out = defaultdict(list)
+    for i in range(n):
+        c = f"clip{i:04d}"
+        out[assign(c, seed, 0.7, 0.15)].append(c)
+    return out
+
+
+REL = {"AFTER", "NEXT_AFTER", "WHILE", "NOT_FOLLOWED"}
+QTYPES = ["PLAIN", "ORDINAL", "AFTER", "BEFORE", "NEXT_AFTER", "WHILE", "NOT_FOLLOWED"]
+
+
+def test_hybrid_refuses_to_select_when_there_is_no_validation_data(tmp_path):
+    """Scoring both arms on benchmark_test.jsonl leaves nothing to select on. The
+    first full run did exactly that and the hybrid came out byte-identical to arm
+    A, reported as a result. It has to fail instead."""
+    import pytest
+
+    from ctag import hybrid
+
+    clips = _clips_by_split()
+    _write_run(tmp_path / "d", clips["test"], QTYPES, lambda t: 0.2)
+    _write_run(tmp_path / "a", clips["test"], QTYPES,
+               lambda t: 0.3 if t in REL else 0.1)
+
+    with pytest.raises(SystemExit) as e:
+        hybrid.main(["--direct", str(tmp_path / "d"), "--agent", str(tmp_path / "a"),
+                     "--out", str(tmp_path / "out")])
+    assert "nothing to select on" in str(e.value)
+
+
+def test_hybrid_selects_per_type_from_the_validation_runs(tmp_path):
+    import json
+
+    from ctag import hybrid
+
+    clips = _clips_by_split()
+    _write_run(tmp_path / "td", clips["test"], QTYPES, lambda t: 0.2)
+    _write_run(tmp_path / "ta", clips["test"], QTYPES, lambda t: 0.3 if t in REL else 0.1)
+    _write_run(tmp_path / "vd", clips["val"], QTYPES, lambda t: 0.2)
+    _write_run(tmp_path / "va", clips["val"], QTYPES, lambda t: 0.3 if t in REL else 0.1)
+
+    hybrid.main(["--direct", str(tmp_path / "td"), "--agent", str(tmp_path / "ta"),
+                 "--direct-val", str(tmp_path / "vd"), "--agent-val", str(tmp_path / "va"),
+                 "--out", str(tmp_path / "out")])
+    summary = json.loads((tmp_path / "out" / "summary.json").read_text())
+    assert {t: summary["choice"][t] for t in REL} == {t: "agent" for t in REL}
+    assert summary["choice"]["PLAIN"] == "direct"
+    assert summary["choice"]["BEFORE"] == "direct"
+    # and the hybrid must actually beat direct on the types it switched
+    assert summary["by_type"]["AFTER"]["f1@0.5"] > summary["arms"]["direct"]["AFTER"]["f1@0.5"]
+
+
+def test_hybrid_rejects_validation_runs_that_overlap_the_test_runs(tmp_path):
+    """Selecting on queries that are also reported is choosing the maximum of two
+    noisy estimates and calling it a method."""
+    import pytest
+
+    from ctag import hybrid
+
+    clips = _clips_by_split()
+    _write_run(tmp_path / "td", clips["test"], QTYPES, lambda t: 0.2)
+    _write_run(tmp_path / "ta", clips["test"], QTYPES, lambda t: 0.3 if t in REL else 0.1)
+
+    with pytest.raises(SystemExit) as e:
+        hybrid.main(["--direct", str(tmp_path / "td"), "--agent", str(tmp_path / "ta"),
+                     "--direct-val", str(tmp_path / "td"), "--agent-val", str(tmp_path / "ta"),
+                     "--out", str(tmp_path / "out")])
+    assert "validation and test" in str(e.value)
