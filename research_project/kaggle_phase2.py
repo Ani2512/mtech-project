@@ -8,8 +8,12 @@ Ordered so the essential comparison finishes first. Measured on a T4 at
     arm E train   2.9 h      union k=3           2.3 h
     arm E eval    0.8 h      hybrid              instant
 
-That totals about 10.7 h, inside a 12 h session. Every step is skipped when its
-output exists, so a timeout is resumed by re-running this file.
+That totals about 10.7 h. Two Kaggle limits cut across it: the enforced weekly
+GPU quota is *floating* (the API reported 6 h on 2026-09-12 while the editor
+showed "30 hrs"), and a single session is capped. So a full pass may need more
+than one session. Every step is skipped when its output exists and results are
+copied to the notebook output after every step, so a stopped session hands back
+whatever finished and re-running this file continues from there.
 
     %run /kaggle/working/bootstrap.py      # once, to set up and smoke test
     %run /kaggle/working/phase2.py         # this
@@ -29,6 +33,10 @@ import time
 
 WORK = "/kaggle/working/mtech-project/research_project"
 TEST = "data/esc50/benchmark_test.jsonl"
+# Adapters go under /kaggle/working, which Kaggle keeps as the version output
+# even when a session is stopped by the quota or the session limit.
+# /kaggle/temp is discarded, which is where the first run put them.
+ADAPTERS = "/kaggle/working/adapters"
 VAL = "data/esc50/benchmark_val.jsonl"
 os.environ.setdefault("HF_HOME", "/kaggle/temp/hf")
 os.chdir(WORK)
@@ -43,6 +51,27 @@ VAL_N = os.environ.get("CTAG_VAL_N", "400")
 print(f"[phase2] epochs={EPOCHS}  amp={AMP}")
 
 
+RESULTS = "/kaggle/working/results"
+
+
+def persist():
+    """Copy every finished run to the notebook output now, not at the end.
+
+    The first full run copied results only after the last arm. A session that
+    is stopped by the weekly GPU quota or the session limit never reaches that
+    line, and everything computed until then is lost. Copying after each step
+    means a stopped session still hands back every arm that completed.
+    """
+    import glob
+    import shutil
+
+    os.makedirs(RESULTS, exist_ok=True)
+    for src in glob.glob("runs/esc50/*"):
+        dst = os.path.join(RESULTS, os.path.basename(src))
+        shutil.rmtree(dst, ignore_errors=True)
+        shutil.copytree(src, dst)
+
+
 def run(label, cmd, produces):
     if produces and os.path.exists(produces):
         print(f"\n=== {label}: already done ===", flush=True)
@@ -52,6 +81,7 @@ def run(label, cmd, produces):
     rc = subprocess.run([sys.executable, "-m"] + cmd).returncode
     print(f"--- {label}: {'ok' if rc == 0 else f'FAILED rc={rc}'} in {(time.time()-t0)/60:.0f} min",
           flush=True)
+    persist()
     return rc == 0
 
 
@@ -60,11 +90,11 @@ ok = True
 # --- arm C first: it is the main comparison ---------------------------------
 ok &= run("train arm C (text timestamps)",
           ["ctag.train_lora", "--data", "data/esc50/sft_train.jsonl",
-           "--val", "data/esc50/sft_val.jsonl", "--out", "/kaggle/temp/lora_text",
+           "--val", "data/esc50/sft_val.jsonl", "--out", f"{ADAPTERS}/lora_text",
            "--epochs", EPOCHS, "--amp", AMP],
-          "/kaggle/temp/lora_text/adapter_model.safetensors")
+          f"{ADAPTERS}/lora_text/adapter_model.safetensors")
 ok &= run("eval arm C",
-          ["ctag.run_zeroshot", "--model", "qwen2.5-omni", "--adapter", "/kaggle/temp/lora_text",
+          ["ctag.run_zeroshot", "--model", "qwen2.5-omni", "--adapter", f"{ADAPTERS}/lora_text",
            "--bench", TEST, "--out", "runs/esc50/test_lora_text"],
           "runs/esc50/test_lora_text/summary.json")
 
@@ -99,12 +129,12 @@ run("arm D (hybrid, selection on val)",
 # --- arm E: a reproduction of published work, so it yields if time runs short
 ok &= run("train arm E (timestamp tokens)",
           ["ctag.train_lora", "--data", "data/esc50/sft_train_tt.jsonl",
-           "--val", "data/esc50/sft_val_tt.jsonl", "--out", "/kaggle/temp/lora_tt",
+           "--val", "data/esc50/sft_val_tt.jsonl", "--out", f"{ADAPTERS}/lora_tt",
            "--epochs", EPOCHS, "--amp", AMP,
            "--time-tokens", "--time-sigma", "0.3", "--time-lambda", "0.5"],
-          "/kaggle/temp/lora_tt/adapter_model.safetensors")
+          f"{ADAPTERS}/lora_tt/adapter_model.safetensors")
 ok &= run("eval arm E",
-          ["ctag.run_zeroshot", "--model", "qwen2.5-omni", "--adapter", "/kaggle/temp/lora_tt",
+          ["ctag.run_zeroshot", "--model", "qwen2.5-omni", "--adapter", f"{ADAPTERS}/lora_tt",
            "--bench", TEST, "--out", "runs/esc50/test_lora_tt"],
           "runs/esc50/test_lora_tt/summary.json")
 
@@ -138,16 +168,11 @@ for metric in ("f1@0.5", "f_beta", "count_acc"):
              if isinstance(runs[m].get(t, {}).get(metric), (int, float)) else f"{'-':>13}")
             for t in TYPES))
 
-# persist: /kaggle/working is kept as the notebook output
+# final persist, plus the docs for context
 import shutil
 
-out = "/kaggle/working/results"
-os.makedirs(out, exist_ok=True)
-for src in glob.glob("runs/esc50/*"):
-    dst = os.path.join(out, os.path.basename(src))
-    shutil.rmtree(dst, ignore_errors=True)
-    shutil.copytree(src, dst)
+persist()
 for doc in glob.glob("docs/*.md"):
-    shutil.copy(doc, out)
-print(f"\nresults copied to {out} (download from the Output tab)")
+    shutil.copy(doc, RESULTS)
+print(f"\nresults copied to {RESULTS} (download from the Output tab)")
 print("ALL STEPS OK" if ok else "SOME STEPS FAILED - check the log above")
