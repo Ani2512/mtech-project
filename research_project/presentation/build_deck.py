@@ -154,18 +154,21 @@ s = prs.slides.add_slide(BLANK)
 bar = s.shapes.add_shape(1, 0, 0, Inches(0.22), H)
 bar.fill.solid(); bar.fill.fore_color.rgb = BLUE
 bar.line.fill.background(); bar.shadow.inherit = False
-tb = s.shapes.add_textbox(Inches(1.1), Inches(2.25), Inches(11), Inches(1.4))
+tb = s.shapes.add_textbox(Inches(0.22), Inches(2.25), W - Inches(0.22), Inches(1.4))
 p = tb.text_frame.paragraphs[0]
+p.alignment = PP_ALIGN.CENTER
 r = p.add_run(); r.text = "Compositional Temporal\nAudio Grounding"
 r.font.size = Pt(46); r.font.bold = True; r.font.name = FONT; r.font.color.rgb = INK
 p.line_spacing = 1.08
-textbox(s, Inches(1.1), Inches(3.95), Inches(11), Inches(0.5),
+box = textbox(s, Inches(0.22), Inches(3.95), W - Inches(0.22), Inches(0.5),
         ["Finding **when** a sound happens — when the question depends on another sound"],
         size=18, color=SEC)
-textbox(s, Inches(1.1), Inches(5.0), Inches(11), Inches(1.2),
+for para in box.text_frame.paragraphs: para.alignment = PP_ALIGN.CENTER
+box = textbox(s, Inches(0.22), Inches(5.0), W - Inches(0.22), Inches(1.2),
         ["Anirudh Rangavajhala   ·   M.Tech, IIIT Dharwad",
          "12 September 2026"],
         size=14, color=MUTED, space=5)
+for para in box.text_frame.paragraphs: para.alignment = PP_ALIGN.CENTER
 n += 1
 
 # ---------------------------------------------------------------- 2 problem
