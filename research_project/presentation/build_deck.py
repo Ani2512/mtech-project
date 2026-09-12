@@ -164,7 +164,7 @@ textbox(s, Inches(1.1), Inches(3.95), Inches(11), Inches(0.5),
         size=18, color=SEC)
 textbox(s, Inches(1.1), Inches(5.0), Inches(11), Inches(1.2),
         ["Anirudh Rangavajhala   ·   M.Tech, IIIT Dharwad",
-         "Phase 1 and Phase 2 review   ·   12 September 2026"],
+         "12 September 2026"],
         size=14, color=MUTED, space=5)
 n += 1
 
