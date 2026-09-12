@@ -17,9 +17,13 @@ intersection is the gap.
 
 *Conditional Multi-Event Temporal Grounding in Long-Form Video*, Zou et al., June 2026.
 
-It is this task, in video: conditional multi-event grounding with four temporal and
-three spatial condition types, rejection queries, a Rejection-F1 metric, and a
-training-free agent (CoMET-Agent). The deck says the framing is a port of it and
+It is this task, in video — and video *only*: the full text has no mention of
+audio, speech or transcripts. Four temporal condition types (Causal, Sequential,
+Synchronous, Bounded) and three spatial (Static, Dynamic, Identity), rejection
+queries, a Rejection-F1 metric, and a training-free agent (CoMET-Agent). The
+mapping onto this project is nearly one-to-one: Sequential ≈ AFTER / BEFORE /
+NEXT_AFTER, Synchronous ≈ WHILE, Bounded ≈ NOT_FOLLOWED. Causal and the three
+spatial types have no audio analogue. The deck says the framing is a port of it and
 cites it as such. Anyone who knows CoMET-Bench will see the resemblance
 immediately, so name it first rather than let a reviewer find it.
 
