@@ -1,3 +1,8 @@
+> **Moved (2026-09-13).** This directory is frozen. The project now lives at
+> https://github.com/Ani2512/mtech-thesis-project (project at the repository root,
+> branch `main`). Kaggle run v5 (2026-09-13) was launched from this copy at commit
+> 175e60e; every later change goes to the new repository.
+
 # Compositional Temporal Audio Grounding
 
 **Task.** Given an audio recording and a query with a temporal condition,
