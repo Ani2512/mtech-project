@@ -65,6 +65,14 @@ encoder is the fastest route to overfitting the composed-audio distribution.
 This is a limitation to state, not to hide: it caps how much arm C can fix the
 grounding problem, which is precisely the problem that matters.
 
+*Caveat recorded 2026-09-13:* the first adapter that trained to completion (Kaggle
+v4) did **not** honour this. Its `target_modules` were bare names, which PEFT also
+matched inside `audio_tower.layers.*` and `visual.blocks.*`, so 192 audio-encoder
+and 192 vision-encoder LoRA tensors were trained beside the 392 language-model
+ones. That adapter is scored as its own arm, **C-enc**, and `train_lora` now
+targets the language model by full module path and refuses anything else. See
+`results_kaggle_v4.md`.
+
 **Clip-level split by stable hash.** Queries from one clip share audio and a
 timeline, so a query-level split leaks. The hash is over (clip_id, seed) so
 adding clips later never reshuffles existing assignments and a model trained

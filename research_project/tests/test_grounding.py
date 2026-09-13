@@ -1051,3 +1051,108 @@ def test_audio_flamingo_3_prompt_carries_the_same_instruction_as_the_other_backe
     import inspect
     src = inspect.getsource(get_backend)
     assert '"audio-flamingo-3"' in src
+
+
+def test_hybrid_selects_on_the_reported_metric_not_the_row_mean(tmp_path):
+    """summarize() reports f1@0.5 over non-rejection queries. The selector used
+    to average the per-row f1 over every row, and a rejection query scores 1.0
+    for an empty answer -- so an arm that answers "nothing" most of the time
+    looked like it won every type on val while losing four of them by the
+    reported number. The v4 hybrid chose the agent for all seven types that way."""
+    import json
+
+    from ctag import hybrid
+
+    clips = _clips_by_split()
+
+    def write(dirpath, clip_list, agent):
+        dirpath.mkdir(parents=True, exist_ok=True)
+        with open(dirpath / "predictions.jsonl", "w", encoding="utf-8") as f:
+            for c in clip_list:
+                for j in range(10):
+                    rejection = j >= 6                    # 40 % rejection queries
+                    if agent:
+                        # answers empty always: right on rejection rows, wrong otherwise
+                        s = score_query([], [] if rejection else [(1.0, 2.0)], rejection)
+                    else:
+                        # never empty: half right on real queries, wrong on rejection rows
+                        pred = [(1.0, 2.0)] if j % 2 == 0 else [(8.0, 9.0)]
+                        s = score_query(pred, [] if rejection else [(1.0, 2.0)], rejection)
+                    f.write(json.dumps({"qid": f"{c}_q{j}", "qtype": "AFTER", **s}) + "\n")
+
+    write(tmp_path / "vd", clips["val"], agent=False)
+    write(tmp_path / "va", clips["val"], agent=True)
+    write(tmp_path / "td", clips["test"], agent=False)
+    write(tmp_path / "ta", clips["test"], agent=True)
+
+    # sanity: the row mean would pick the agent (0.4 vs 0.3), the reported metric direct
+    rows_a = [json.loads(l) for l in open(tmp_path / "va" / "predictions.jsonl")]
+    rows_d = [json.loads(l) for l in open(tmp_path / "vd" / "predictions.jsonl")]
+    assert sum(r["f1@0.5"] for r in rows_a) / len(rows_a) > sum(r["f1@0.5"] for r in rows_d) / len(rows_d)
+    assert summarize(rows_a)["AFTER"]["f1@0.5"] < summarize(rows_d)["AFTER"]["f1@0.5"]
+
+    hybrid.main(["--direct", str(tmp_path / "td"), "--agent", str(tmp_path / "ta"),
+                 "--direct-val", str(tmp_path / "vd"), "--agent-val", str(tmp_path / "va"),
+                 "--out", str(tmp_path / "out")])
+    summary = json.loads((tmp_path / "out" / "summary.json").read_text())
+    assert summary["choice"]["AFTER"] == "direct"
+    assert summary["by_type"]["AFTER"]["f1@0.5"] == summary["arms"]["direct"]["AFTER"]["f1@0.5"]
+
+
+def test_lora_targets_only_the_language_model():
+    """The bare names ["q_proj", ...] also match the audio tower's and the vision
+    tower's attention projections. The first completed adapter had 192 audio and
+    192 visual LoRA tensors next to the 392 language-model ones."""
+    import re
+
+    from ctag.train_lora import LM_TARGET_MODULES
+
+    lm = ["model.layers.0.self_attn.q_proj", "model.layers.27.mlp.down_proj",
+          "model.layers.3.self_attn.o_proj", "model.layers.12.mlp.gate_proj"]
+    not_lm = ["audio_tower.layers.0.self_attn.q_proj", "visual.blocks.5.attn.qkv",
+              "visual.blocks.5.attn.proj", "audio_tower.layers.31.fc1",
+              "lm_head", "model.embed_tokens", "model.layers.0.self_attn.q_proj.weight"]
+    assert all(re.fullmatch(LM_TARGET_MODULES, n) for n in lm)
+    assert not any(re.fullmatch(LM_TARGET_MODULES, n) for n in not_lm)
+
+
+def test_lora_subtree_count_refuses_encoder_leakage():
+    from torch import nn
+
+    from ctag.train_lora import lora_targets_by_subtree
+
+    class Fake(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.a = nn.Linear(2, 2)
+
+    m = Fake()
+    m.a.lora_A = nn.Linear(2, 1)
+    names = {"base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight": 1,
+             "base_model.model.audio_tower.layers.0.self_attn.q_proj.lora_A.weight": 1,
+             "base_model.model.model.layers.0.self_attn.q_proj.base_layer.weight": 1}
+
+    class Named:
+        def named_parameters(self):
+            return [(n, None) for n in names]
+
+    assert lora_targets_by_subtree(Named()) == {"model": 1, "audio_tower": 1}
+
+
+def test_new_rows_delta_lives_where_the_base_rows_live():
+    """Arm E's second death: the delta was born on the CPU while the 4-bit base sat
+    on the GPU. Only the CPU case is testable here, but the device is read off
+    the base weight rather than assumed."""
+    import torch
+    from torch import nn
+
+    from ctag.timetokens import _new_rows_modules
+
+    NewRowsEmbedding, NewRowsLinear = _new_rows_modules()
+    base = nn.Embedding(10, 4)
+    emb = NewRowsEmbedding(base, 8)
+    assert emb.delta.device == base.weight.device
+    head = NewRowsLinear(nn.Linear(4, 10, bias=False), 8)
+    assert head.delta.device == head.base.weight.device
+    out = emb(torch.tensor([[1, 9]]))
+    assert out.shape == (1, 2, 4)

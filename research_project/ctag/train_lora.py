@@ -127,6 +127,27 @@ class GroundingCollator:
         return enc
 
 
+# Only the thinker's language model: Qwen2_5OmniThinkerForConditionalGeneration
+# holds it at `model.layers.N`; the encoders are `audio_tower.layers.N` and
+# `visual.blocks.N`. PEFT applies re.fullmatch to the module path when
+# target_modules is a string.
+LM_TARGET_MODULES = (r"model\.layers\.\d+\."
+                     r"(self_attn\.(q|k|v|o)_proj|mlp\.(gate|up|down)_proj)")
+
+
+def lora_targets_by_subtree(model) -> dict[str, int]:
+    """Count LoRA tensors per top-level subtree, e.g. {'model': 392}. Used to
+    refuse an adapter that has leaked into the encoders."""
+    from collections import Counter
+
+    counts: Counter = Counter()
+    for name, _ in model.named_parameters():
+        if "lora_" in name:
+            parts = name.replace("base_model.model.", "", 1).split(".")
+            counts[parts[0]] += 1
+    return dict(counts)
+
+
 def build_model(model_id: str, precision: str | None, lora_r: int, lora_alpha: int,
                 lora_dropout: float, time_tokens: bool = False, max_seconds: float = 30.0,
                 resolution: float = 0.1):
@@ -172,8 +193,16 @@ def build_model(model_id: str, precision: str | None, lora_r: int, lora_alpha: i
         # Language side only. The audio encoder is frozen: with ~200 training clips
         # there is not enough signal to retrain perception, and unfreezing it is the
         # fastest way to overfit the composed-audio distribution.
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                        "gate_proj", "up_proj", "down_proj"],
+        #
+        # A regex on the full module path, not a list of names. The bare names
+        # ["q_proj", ...] also match the audio tower's and the vision tower's
+        # attention projections (audio_tower.layers.N.self_attn.q_proj,
+        # visual.blocks.N.attn.*), and the first adapter that trained to
+        # completion had 192 audio-tower and 192 visual LoRA tensors alongside
+        # the 392 language-model ones -- the "frozen encoder" was not frozen.
+        # That adapter is kept as its own arm (lora_text_enc) rather than
+        # passed off as this one.
+        target_modules=LM_TARGET_MODULES,
         # Not modules_to_save=["embed_tokens", "lm_head"]: that makes both full
         # 152,064 x 3,584 matrices trainable, about 16 GiB of weights, gradients
         # and Adam state, which is why arm E died on a T4 inside a minute. The
@@ -187,6 +216,13 @@ def build_model(model_id: str, precision: str | None, lora_r: int, lora_alpha: i
         wrap_new_rows(model, base_vocab)
 
     model = get_peft_model(model, cfg)
+
+    where = lora_targets_by_subtree(model)
+    print(f"[train] LoRA tensors per subtree: {where}")
+    leaked = {k: v for k, v in where.items() if k != "model"}
+    if leaked or not where:
+        raise RuntimeError(f"LoRA must attach to the language model only, got {where}; "
+                           "the encoders would be trained on ~200 clips")
 
     if time_tokens:
         # get_peft_model freezes everything it does not own, the deltas included.

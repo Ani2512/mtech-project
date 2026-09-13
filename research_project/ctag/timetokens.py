@@ -186,8 +186,13 @@ def _new_rows_modules():
             n_new = base.num_embeddings - self.base_size
             if n_new <= 0:
                 raise ValueError(f"no new rows: {base.num_embeddings} <= {base_size}")
+            # On the device the base rows already occupy. A CPU-born parameter
+            # next to a GPU-resident model fails at the first forward with
+            # "indices should be either on cpu or on the same device as the
+            # indexed tensor", which is how arm E died on its second attempt.
             self.delta = nn.Parameter(
-                torch.zeros(n_new, base.embedding_dim, dtype=torch.float32))
+                torch.zeros(n_new, base.embedding_dim, dtype=torch.float32,
+                            device=base.weight.device))
             for p in self.base.parameters():
                 p.requires_grad_(False)
 
@@ -197,9 +202,13 @@ def _new_rows_modules():
 
         def forward(self, ids):
             out = self.base(ids)
+            # Under device_map the base carries an accelerate hook that moves
+            # `ids` to its own device; the wrapper does not, so index on the
+            # device the output (and the delta) actually live on.
+            ids = ids.to(out.device)
             is_new = ids >= self.base_size
             idx = (ids - self.base_size).clamp_(min=0)
-            add = self.delta.to(out.dtype)[idx]
+            add = self.delta.to(device=out.device, dtype=out.dtype)[idx]
             return out + add * is_new.unsqueeze(-1).to(out.dtype)
 
     class NewRowsLinear(nn.Module):
@@ -219,13 +228,15 @@ def _new_rows_modules():
                 if base.bias is not None:
                     base.bias[self.base_size:].zero_()
             self.delta = nn.Parameter(
-                torch.zeros(n_new, base.in_features, dtype=torch.float32))
+                torch.zeros(n_new, base.in_features, dtype=torch.float32,
+                            device=base.weight.device))
             for p in self.base.parameters():
                 p.requires_grad_(False)
 
         def forward(self, x):
             logits = self.base(x)
-            tail = F.linear(x, self.delta.to(x.dtype))
+            tail = F.linear(x.to(self.delta.device),
+                            self.delta.to(x.dtype)).to(logits.device)
             return torch.cat([logits[..., :self.base_size],
                               logits[..., self.base_size:] + tail], dim=-1)
 

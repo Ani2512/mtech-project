@@ -87,7 +87,48 @@ def run(label, cmd, produces):
 
 ok = True
 
-# --- arm C first: it is the main comparison ---------------------------------
+# --- seed from a previous run's output, attached as a Kaggle dataset ---------
+# v4 (2026-09-12) produced arms A, B, both val runs and the union run, plus a
+# trained adapter. Copying them in means those steps are skipped (their
+# `produces` file exists) and only the missing arms cost GPU time.
+SEED = os.environ.get("CTAG_SEED_DIR", "/kaggle/input/ctag-phase2-v4")
+if os.path.isdir(SEED):
+    import glob as _glob
+    import shutil as _shutil
+
+    # Found by marker file rather than by path: Kaggle extracts uploaded
+    # archives itself and the nesting depth is not worth depending on.
+    os.makedirs("runs/esc50", exist_ok=True)
+    for marker in sorted(_glob.glob(f"{SEED}/**/summary.json", recursive=True)):
+        src = os.path.dirname(marker)
+        dst = os.path.join("runs/esc50", os.path.basename(src))
+        if not os.path.exists(dst):
+            _shutil.copytree(src, dst)
+            print(f"[seed] {os.path.basename(src)} <- {src}")
+    for marker in sorted(_glob.glob(f"{SEED}/**/adapter_model.safetensors", recursive=True)):
+        src = os.path.dirname(marker)
+        dst = os.path.join(ADAPTERS, os.path.basename(src))
+        if not os.path.exists(dst):
+            _shutil.copytree(src, dst)
+            print(f"[seed] adapter {os.path.basename(src)} <- {src}")
+    persist()
+else:
+    print(f"[seed] no seed dir at {SEED}; every arm runs from scratch")
+
+# --- the v4 adapter: LoRA that leaked into the audio and vision encoders -----
+# Its target_modules were bare names, which also matched audio_tower.*.q_proj
+# and visual.blocks.*.attn.*. It is a legitimate "LoRA on encoder + LM" arm,
+# so it is scored under its own name rather than discarded; arm C below is the
+# language-model-only adapter the plan describes. Cheap (one eval) and first,
+# so a stopped session still hands back a fine-tuned number.
+if os.path.exists(f"{ADAPTERS}/lora_text_enc/adapter_model.safetensors"):
+    ok &= run("eval arm C-enc (v4 adapter, LoRA on encoders + LM)",
+              ["ctag.run_zeroshot", "--model", "qwen2.5-omni",
+               "--adapter", f"{ADAPTERS}/lora_text_enc",
+               "--bench", TEST, "--out", "runs/esc50/test_lora_text_enc"],
+              "runs/esc50/test_lora_text_enc/summary.json")
+
+# --- arm C: it is the main comparison ---------------------------------------
 ok &= run("train arm C (text timestamps)",
           ["ctag.train_lora", "--data", "data/esc50/sft_train.jsonl",
            "--val", "data/esc50/sft_val.jsonl", "--out", f"{ADAPTERS}/lora_text",

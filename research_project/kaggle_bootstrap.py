@@ -55,6 +55,12 @@ step("dependencies")
 run([sys.executable, "-m", "pip", "install", "-q", "scipy", "soundfile", "librosa",
      "pyyaml", "pytest", "transformers>=4.52", "qwen-omni-utils", "accelerate",
      "bitsandbytes", "peft"], check=False)
+# The Kaggle image ships torchao 0.10; peft's LoRA dispatcher checks the
+# version whenever a target module is not a bitsandbytes layer and raises
+# "Found an incompatible version of torchao ... only versions above 0.16.0 are
+# supported". That killed the arm C eval in v4 after a 3-hour train. Nothing
+# here uses torchao, and with it absent the dispatcher simply moves on.
+run([sys.executable, "-m", "pip", "uninstall", "-q", "-y", "torchao"], check=False)
 
 step("self-test")
 if run([sys.executable, "-m", "pytest", "tests", "-q", "-p", "no:warnings"]).returncode:

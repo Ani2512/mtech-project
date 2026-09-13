@@ -10,6 +10,15 @@ if the choice is made on validation clips and reported on test clips. Selecting
 on the test set and reporting the same numbers would be choosing the maximum of
 two noisy estimates and calling it a method.
 
+Selection uses the same number that is reported: summarize()'s per-type
+f1@0.5, which averages over queries whose ground truth is non-empty. An earlier
+version averaged the per-row f1 over EVERY validation row, and a rejection
+query (empty ground truth) scores 1.0 whenever the answer is empty. The agent
+answers empty far more often than direct prompting (under-report 0.46 vs 0.23
+on val), so that mean credited it with a clean sweep of all seven types on val
+while the reported metric had it losing four of them. Selecting on one metric
+and reporting another is not selection, it is a different question.
+
 Selection needs validation queries. When --direct/--agent hold only test-split
 queries -- which is what happens if the arms were scored on benchmark_test.jsonl
 -- there is nothing to select on, and an earlier version silently fell back to
@@ -90,11 +99,25 @@ def main(argv=None):
         dv, gv = direct, agent
         val_shared = [q for q in shared if split_of[q] == "val"]
 
-    val_scores: dict[str, dict[str, list]] = defaultdict(lambda: {"direct": [], "agent": []})
-    for q in val_shared:
-        t = dv[q]["qtype"]
-        val_scores[t]["direct"].append(dv[q][a.metric])
-        val_scores[t]["agent"].append(gv[q][a.metric])
+    # Score the validation rows exactly as the test rows are reported. The
+    # per-type f1 is over non-rejection queries only, so an arm that answers
+    # "nothing" often gets no credit for the rejection queries it happens to
+    # get right -- that behaviour is reported separately as rejection_f1.
+    val_rows_d = [dv[q] for q in val_shared]
+    val_rows_g = [gv[q] for q in val_shared]
+    sum_d = summarize(val_rows_d) if val_rows_d else {}
+    sum_g = summarize(val_rows_g) if val_rows_g else {}
+    val_scores: dict[str, dict[str, object]] = {}
+    for t in sorted(set(sum_d) | set(sum_g)):
+        if t == "ALL":
+            continue
+        md, mg = sum_d.get(t, {}).get(a.metric), sum_g.get(t, {}).get(a.metric)
+        if md is None and mg is None:
+            continue                      # e.g. ABSENT: every query is a rejection query
+        val_scores[t] = {"direct": md, "agent": mg,
+                         "n": sum_d.get(t, sum_g.get(t))["n"],
+                         "n_scored": sum_d.get(t, sum_g.get(t))["n"]
+                         - sum_d.get(t, sum_g.get(t))["n_rejection_queries"]}
 
     if not val_scores:
         raise SystemExit(
@@ -105,16 +128,16 @@ def main(argv=None):
             "--direct-val/--agent-val.")
 
     choice = {}
-    print(f"\narm chosen per type, on VAL ({a.metric})")
-    print(f"{'type':<14}{'direct':>10}{'agent':>10}{'n':>6}  chosen")
+    print(f"\narm chosen per type, on VAL ({a.metric}, non-rejection queries)")
+    print(f"{'type':<14}{'direct':>10}{'agent':>10}{'n':>6}{'scored':>8}  chosen")
     for t in sorted(val_scores):
-        d = val_scores[t]["direct"]; g = val_scores[t]["agent"]
-        md = sum(d) / len(d) if d else 0.0
-        mg = sum(g) / len(g) if g else 0.0
+        md = val_scores[t]["direct"] or 0.0
+        mg = val_scores[t]["agent"] or 0.0
         choice[t] = "agent" if mg > md else "direct"
-        print(f"{t:<14}{md:>10.3f}{mg:>10.3f}{len(d):>6}  {choice[t]}")
+        print(f"{t:<14}{md:>10.3f}{mg:>10.3f}{val_scores[t]['n']:>6}"
+              f"{val_scores[t]['n_scored']:>8}  {choice[t]}")
 
-    thin = [t for t in val_scores if len(val_scores[t]["direct"]) < 20]
+    thin = [t for t in val_scores if val_scores[t]["n_scored"] < 20]
     if thin:
         print(f"[warn] fewer than 20 validation queries for: {', '.join(sorted(thin))} "
               "-- those per-type choices are close to a coin flip")

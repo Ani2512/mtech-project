@@ -75,4 +75,4 @@ PLAIN 0.290 0.332 56 agent
 WHILE 0.128 0.269 54 agent
 ```
 
-Decomposition beat direct on all seven types on val, so the hybrid equals arm B on test (0.218). The BEFORE/WHILE reversals seen on test are therefore within split-to-split noise at ~50 queries per type.
+**Correction (2026-09-13, see results_kaggle_v4.md):** this table is NOT the reported metric. The selector at the time averaged the per-row f1 over every validation row, and a rejection query (empty ground truth) scores 1.0 whenever the answer is empty. The agent answers empty about twice as often as direct prompting, so it was credited with a clean sweep. By the metric that is actually reported (f1@0.5 over non-rejection queries, exactly as in `summary.json`) the agent wins PLAIN, AFTER, NEXT_AFTER and NOT_FOLLOWED on val and loses ORDINAL, BEFORE and WHILE. The claim that "BEFORE/WHILE reversals are split noise" is withdrawn: the agent loses BEFORE and WHILE on both splits. The selector was fixed in `ctag.hybrid` and the corrected hybrid scores 0.229 on test (direct 0.207, agent 0.218).
