@@ -1156,3 +1156,87 @@ def test_new_rows_delta_lives_where_the_base_rows_live():
     assert head.delta.device == head.base.weight.device
     out = emb(torch.tensor([[1, 9]]))
     assert out.shape == (1, 2, 4)
+
+
+class _FakeTok:
+    """Enough of a tokenizer for init_embeddings and vocab_from_tokenizer:
+    digits and '.' are base pieces, timestamp tokens are added ids."""
+    def __init__(self, vocab):
+        self.base = {c: i for i, c in enumerate("0123456789.none")}
+        self.added = {t: len(self.base) + i for i, t in enumerate(vocab.tokens)}
+    def __len__(self):
+        return len(self.base) + len(self.added)
+    def convert_tokens_to_ids(self, t):
+        return self.added.get(t, -1)
+    def get_added_vocab(self):
+        return dict(self.added)
+    def __call__(self, text, add_special_tokens=False):
+        class R: pass
+        r = R(); r.input_ids = [self.base[c] for c in text if c in self.base]; return r
+
+
+def test_inference_adds_the_delta_to_the_rows_it_was_trained_on(tmp_path):
+    """resize_token_embeddings fills new rows from a fitted normal, not from the
+    mean-of-BPE init training used. Loading the delta onto those random rows
+    gives a different embedding for every timestamp token than the one the
+    adapter learned against -- a silent way to make arm E measure nothing."""
+    import torch
+    from torch import nn
+
+    from ctag.timetokens import TimeVocab, load_deltas, save_deltas, wrap_new_rows
+
+    v = TimeVocab(1.0, 0.5)                     # 3 times + none = 4 new tokens
+    tok = _FakeTok(v)
+    base_size = len(tok.base); n_new = len(v.tokens); h = 6
+
+    class Tiny(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.emb = nn.Embedding(base_size + n_new, h)
+            self.head = nn.Linear(h, base_size + n_new, bias=False)
+        def get_input_embeddings(self): return self.emb
+        def set_input_embeddings(self, m): self.emb = m
+        def get_output_embeddings(self): return self.head
+        def set_output_embeddings(self, m): self.head = m
+
+    torch.manual_seed(0)
+    trained = Tiny()
+    v.init_embeddings(tok, trained.emb.weight)          # what train_lora does
+    emb_t, _ = wrap_new_rows(trained, base_size)
+    with torch.no_grad():
+        emb_t.delta.normal_()
+    save_deltas(trained, tmp_path)
+    ids = torch.tensor([[base_size, base_size + 2, 3]])
+    want = emb_t(ids)
+
+    # inference: same base rows, new rows filled with noise as resize() would
+    fresh = Tiny()
+    with torch.no_grad():
+        fresh.emb.weight[:base_size].copy_(trained.emb.weight[:base_size] if hasattr(trained.emb, "weight") else emb_t.base.weight[:base_size])
+        fresh.emb.weight[base_size:].normal_()
+    assert load_deltas(fresh, tmp_path, tokenizer=None)
+    assert torch.allclose(fresh.emb(ids), want), "saved base rows were not restored"
+
+    # an older delta file without base rows: rebuilt from the tokenizer
+    blob = torch.load(tmp_path / "time_deltas.pt")
+    del blob["embedding"]["base_rows"]
+    torch.save(blob, tmp_path / "time_deltas.pt")
+    older = Tiny()
+    with torch.no_grad():
+        older.emb.weight[:base_size].copy_(emb_t.base.weight[:base_size])
+        older.emb.weight[base_size:].normal_()
+    assert load_deltas(older, tmp_path, tokenizer=tok)
+    assert torch.allclose(older.emb(ids), want, atol=1e-6), "rebuilt base rows differ from training"
+
+    # and with neither, refuse rather than measure noise
+    import pytest
+    with pytest.raises(RuntimeError):
+        load_deltas(Tiny(), tmp_path, tokenizer=None)
+
+
+def test_vocab_is_recovered_from_the_tokenizer():
+    from ctag.timetokens import TimeVocab, vocab_from_tokenizer
+
+    v = TimeVocab(30.0, 0.1)
+    got = vocab_from_tokenizer(_FakeTok(v))
+    assert got.tokens == v.tokens

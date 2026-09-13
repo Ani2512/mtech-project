@@ -151,3 +151,25 @@ About 9.5 h; the weekly quota has roughly 16 h left before the 2026-09-19 reset.
 
 Decision rule unchanged: C > A on PLAIN means the diagnosis is actionable. C-enc vs C is the
 encoder-unfreezing ablation, answered without spending the month.
+
+## Post-launch review of v5's code paths (2026-09-13, while v5 was running)
+
+A CPU rehearsal of arm E's full mechanics on a tiny Qwen2 language model with the real
+Qwen2.5-Omni tokenizer (add tokens, resize, mean-of-BPE init, row wrappers, LoRA by path regex,
+checkpointed forward/backward, time loss, save, fresh reload, generate) found **one more bug,
+in the inference path**: `resize_token_embeddings` fills the new rows from a fitted normal
+(`mean_resizing=True`), not from the mean-of-BPE init the training used, and `models.py` then
+added the trained delta on top of those random rows. Every timestamp token would have had a
+different input embedding at eval than during training. **v5 runs the old code, so v5's arm E
+number is invalid regardless of how training goes.** Arm C and C-enc are unaffected (no new rows).
+
+Fix (commit after a99af79): `save_deltas` stores the base rows the delta was trained against;
+`load_deltas` restores them, or for a delta file without them rebuilds the rows deterministically
+from the tokenizer, or refuses. The v5 adapter (`lora_tt` + its old-format `time_deltas.pt`) is
+therefore reusable: a v6 seeded with it needs only the ~45 min arm E eval. Also removed: the
+pointless shrink of the embedding matrix to the tokenizer length on the arm C eval path.
+
+Reviewed and judged sound (with the caveat that none of it has run on a GPU): the seed copy
+by marker files, the C-enc eval attaching an encoder-leaked adapter with torchao absent, the
+LM-only regex at PEFT load time, the arm C eval batch and save-before-eval path, and the
+Audio Flamingo 3 conversation format (transformers 5.x processor, audio by path).

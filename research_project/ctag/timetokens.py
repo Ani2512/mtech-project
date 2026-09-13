@@ -268,11 +268,20 @@ def save_deltas(model, out_dir):
 
     import torch
 
+    from torch import nn
+
     found = {}
     for name, mod in model.named_modules():
         if hasattr(mod, "delta") and hasattr(mod, "base_size"):
-            key = "embedding" if "embed" in name.lower() else "lm_head"
+            # keyed on what is wrapped, not on the module's name
+            key = "embedding" if isinstance(mod.base, nn.Embedding) else "lm_head"
             found[key] = {"delta": mod.delta.detach().cpu(), "base_size": mod.base_size}
+            # The base rows under the delta are NOT reproducible at load time:
+            # resize_token_embeddings fills new rows from a fitted normal
+            # (mean_resizing=True), not from TEMPO's mean-of-BPE init the
+            # training used. Save the rows the delta was trained against
+            # (about 4 MB) so inference adds the delta to the same base.
+            found[key]["base_rows"] = mod.base.weight[mod.base_size:].detach().float().cpu()
     if not found:
         return None
     path = os.path.join(out_dir, DELTA_FILE)
@@ -281,8 +290,28 @@ def save_deltas(model, out_dir):
     return path
 
 
-def load_deltas(thinker, adapter_dir):
-    """Re-apply saved deltas at inference. Returns True when they were found."""
+def vocab_from_tokenizer(tokenizer) -> "TimeVocab":
+    """Recover the TimeVocab whose tokens were added to this tokenizer."""
+    import re
+
+    times = sorted(float(m.group(1)) for tok in tokenizer.get_added_vocab()
+                   for m in [re.fullmatch(r"<t=(\d+(?:\.\d+)?)>", tok)] if m)
+    if len(times) < 2:
+        raise ValueError("tokenizer carries no timestamp tokens to rebuild a TimeVocab from")
+    res = min(b - a for a, b in zip(times, times[1:]))
+    v = TimeVocab(times[-1], res)
+    if set(v.tokens) != set(tokenizer.get_added_vocab()) & set(v.tokens) or len(v.times) != len(times):
+        raise ValueError(f"tokenizer's timestamp tokens do not form a TimeVocab({times[-1]}, {res})")
+    return v
+
+
+def load_deltas(thinker, adapter_dir, tokenizer=None):
+    """Re-apply saved deltas at inference. Returns True when they were found.
+
+    The new embedding rows must be the ones the delta was trained on top of.
+    Newer delta files carry them; for an older file they are rebuilt with
+    TEMPO's deterministic mean-of-BPE init, which needs the tokenizer.
+    """
     import os
 
     import torch
@@ -293,10 +322,25 @@ def load_deltas(thinker, adapter_dir):
     blob = torch.load(path, map_location="cpu")
     base_size = next(iter(blob.values()))["base_size"]
     emb, head = wrap_new_rows(thinker, base_size)
+    how = "no embedding delta in the file"
     with torch.no_grad():
         if "embedding" in blob:
-            emb.delta.copy_(blob["embedding"]["delta"].to(emb.delta.dtype))
+            e = blob["embedding"]
+            if "base_rows" in e:
+                emb.base.weight[base_size:].copy_(e["base_rows"].to(emb.base.weight.dtype))
+                how = "saved base rows"
+            elif tokenizer is not None:
+                n = vocab_from_tokenizer(tokenizer).init_embeddings(tokenizer, emb.base.weight)
+                if n != emb.base.weight.shape[0] - base_size:
+                    raise RuntimeError(f"rebuilt {n} timestamp rows, expected "
+                                       f"{emb.base.weight.shape[0] - base_size}")
+                how = f"base rows rebuilt from the tokenizer ({n} rows, old delta file)"
+            else:
+                raise RuntimeError(
+                    f"{path} has no base rows and no tokenizer was given to rebuild them; "
+                    "the delta would sit on random rows and the eval would be meaningless")
+            emb.delta.copy_(e["delta"].to(emb.delta.dtype))
         if "lm_head" in blob:
             head.delta.copy_(blob["lm_head"]["delta"].to(head.delta.dtype))
-    print(f"[qwen2.5-omni] loaded timestamp deltas from {path}")
+    print(f"[qwen2.5-omni] loaded timestamp deltas from {path} ({how})")
     return True

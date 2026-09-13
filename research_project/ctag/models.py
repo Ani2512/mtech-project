@@ -113,11 +113,17 @@ class Qwen25OmniBackend:
             # model emits tokens the tokenizer cannot decode.
             proc_src = adapter if os.path.exists(os.path.join(adapter, "tokenizer_config.json")) else model_id
             self.processor = Qwen2_5OmniProcessor.from_pretrained(proc_src)
+            from .timetokens import DELTA_FILE, load_deltas
+
             n_tok = len(self.processor.tokenizer)
             cur = self.model.thinker.get_input_embeddings().weight.shape[0]
-            if n_tok != cur:
-                # The tokenizer carries the timestamp tokens; the base model must
-                # match that size before anything is attached.
+            has_deltas = os.path.exists(os.path.join(adapter, DELTA_FILE))
+            # Qwen pads the matrix (152,064 rows for 151,665 tokens), so a plain
+            # text adapter's tokenizer is *smaller* than the matrix. Shrinking to
+            # it is pointless and untested; only a tokenizer that added tokens,
+            # or a delta file whose row bookkeeping needs the exact size, gets a
+            # resize.
+            if has_deltas or n_tok > cur:
                 print(f"[qwen2.5-omni] resizing embeddings {cur} -> {n_tok} for the adapter")
                 self.model.thinker.resize_token_embeddings(n_tok)
 
@@ -125,14 +131,12 @@ class Qwen25OmniBackend:
             # (see timetokens.wrap_new_rows), so they live beside the adapter
             # rather than inside it. Without this they stay at initialisation and
             # arm E silently measures nothing.
-            from .timetokens import load_deltas
-
-            had_deltas = load_deltas(self.model.thinker, adapter)
-            if n_tok != cur and not had_deltas:
-                print("[qwen2.5-omni] WARNING: the tokenizer has timestamp tokens but "
-                      "no time_deltas.pt was found next to the adapter; the new "
-                      "embeddings are at their initialisation and predictions "
-                      "using them are meaningless")
+            had_deltas = load_deltas(self.model.thinker, adapter, self.processor.tokenizer)
+            if n_tok > cur and not had_deltas:
+                raise RuntimeError(
+                    "the adapter's tokenizer added tokens but no time_deltas.pt sits "
+                    "next to it; the new embeddings would be random and every "
+                    "prediction using them meaningless")
 
             # train_lora tunes the thinker, so the adapter attaches there, not to
             # the top-level wrapper whose module names it would not match.
